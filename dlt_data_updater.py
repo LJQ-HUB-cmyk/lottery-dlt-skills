@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 DLT大乐透历史数据自动更新器 v2
-使用体彩官网 API (webapi.sporttery.cn) 获取最新开奖数据
+数据源: 体彩数据API (webapi.sporttery.cn)
+注意: 该 API 受 EdgeOne 安全防护，部分环境可能被拦截
 """
 
 import os
@@ -19,13 +20,13 @@ import numpy as np
 SKILL_DIR = Path(__file__).resolve().parent
 DATA_PATH = SKILL_DIR / 'data' / 'DLT历史数据_适配模型版.xlsx'
 
-# 体彩官网API
+# 体彩数据API (sporttery.cn)
 # gameNo=85 是超级大乐透
 API_URL = 'https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry'
 
 
 def _build_url(page_no: int = 1, page_size: int = 30) -> str:
-    """构建体彩官网API请求URL"""
+    """构建体彩数据API请求URL"""
     return (f'{API_URL}?gameNo=85&provinceId=0&pageSize={page_size}'
             f'&isPc=true&pageNo={page_no}')
 
@@ -53,7 +54,7 @@ def _http_get(url: str, timeout: int = 15) -> str:
 
 def fetch_draws_from_api(page_no: int = 1, page_size: int = 30) -> List[dict]:
     """
-    从体彩官网API获取大乐透历史开奖数据
+    从体彩数据API获取大乐透历史开奖数据
 
     Returns:
         [{'期号': int, '前区1'~'前区5': int, '后区1': int, '后区2': int}, ...]
@@ -105,7 +106,7 @@ def fetch_draws_from_api(page_no: int = 1, page_size: int = 30) -> List[dict]:
 
 def fetch_new_draws(last_period: int) -> List[dict]:
     """
-    从体彩官网API获取比 last_period 更新的所有期号
+    从体彩数据API获取比 last_period 更新的所有期号
 
     Returns:
         List[dict]: 新数据，按期号升序排列
@@ -146,7 +147,7 @@ def fetch_new_draws(last_period: int) -> List[dict]:
 
     if new_draws:
         date_strs = [d.get('_date', '') for d in new_draws]
-        print(f"[DLT-Updater] 体彩官网发现 {len(new_draws)} 期新数据: "
+        print(f"[DLT-Updater] 体彩数据发现 {len(new_draws)} 期新数据: "
               f"{new_draws[0]['期号']}~{new_draws[-1]['期号']} "
               f"({date_strs[0]}~{date_strs[-1]})")
     else:
@@ -223,7 +224,7 @@ def append_draws(new_draws: List[dict]) -> int:
 
 def check_and_update() -> dict:
     """
-    主入口：检查体彩官网 → 发现新数据 → 更新Excel
+    主入口：检查体彩数据API → 发现新数据 → 更新Excel
 
     Returns:
         dict:
@@ -300,9 +301,9 @@ def verify_latest_period() -> dict:
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='DLT体彩官网数据更新器 v2')
+    parser = argparse.ArgumentParser(description='DLT体彩数据更新器 v2')
     parser.add_argument('--check', action='store_true', help='仅检查最新一期')
-    parser.add_argument('--latest', action='store_true', help='查看官网最新开奖')
+    parser.add_argument('--latest', action='store_true', help='查看最新开奖')
     args = parser.parse_args()
 
     if args.latest:

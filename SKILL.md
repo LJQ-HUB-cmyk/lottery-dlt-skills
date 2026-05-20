@@ -4,7 +4,7 @@
 
 DLT大乐透智能预测系统 V1.0。五池采样（热号/冷号/均衡/趋势/质数）+ 博弈论遗传算法融合 + 约束满足引擎，支持前后区复式投注生成，池级别回测全部跑赢随机基准。
 
-**数据源**: 自动从体彩官网同步最新开奖数据
+**数据源**: 自动从体彩数据API (webapi.sporttery.cn) 同步最新开奖数据
 
 ---
 
@@ -13,9 +13,12 @@ DLT大乐透智能预测系统 V1.0。五池采样（热号/冷号/均衡/趋势
 ### 0. 📡 自动数据更新
 每次初始化时自动完成以下步骤：
 1. 读取本地 Excel 数据文件的最后一期期号
-2. 从 **500.com** 体彩数据源检查是否有新开奖数据
+2. 从 **体彩数据API (webapi.sporttery.cn)** 检查是否有新开奖数据
 3. 发现新期号 → 自动解析号码 → 追加到 Excel → 更新完成
 4. 无新数据 → 跳过 → 直接使用现有数据
+
+> ⚠️ 注意：体彩数据API启用了 EdgeOne 安全防护，部分环境下可能被拦截导致更新失败。
+> 如遇更新失败，可手动补充数据到 Excel 文件，或切换至离线模式使用已有数据。
 
 支持 `auto_update=False` 跳过网络检查。
 
@@ -94,7 +97,7 @@ print(f"新增{result['new_count']}期，最新{result['last_period']}")
 | 后区范围 | 1-12 |
 | 复式方案 | 12种 |
 | 回测基准 | 全部跑赢随机 |
-| 数据源 | 500.com |
+| 数据源 | 体彩数据API (webapi.sporttery.cn) |
 
 ---
 
@@ -103,7 +106,7 @@ print(f"新增{result['new_count']}期，最新{result['last_period']}")
 ```
 dlt_lottery_prediction/
 ├── dlt_fusion_complete.py              # 主入口（DLTFusionComplete类）
-├── dlt_data_updater.py                 # 📡 自动数据更新器
+├── dlt_data_updater.py                 # 📡 自动数据更新器（体彩数据API）
 ├── dlt_five_pool_fusion.py             # 五池融合
 ├── dlt_five_pool_sampler.py            # 五池采样器
 ├── five_pool_sampler_complete_final.py # 最终采样器（修复池间重复Bug）
@@ -124,7 +127,7 @@ dlt_lottery_prediction/
 │   ├── dlt_betting.py                  # 基础投注
 │   └── dlt_strategy_recommender.py     # 策略推荐
 ├── data/
-│   └── DLT历史数据_适配模型版.xlsx      # 历史开奖数据（自动更新）
+│   └── DLT历史数据_适配模型版.xlsx      # 历史开奖数据（体彩数据API自动更新）
 └── SKILL.md                           # 本文档
 ```
 
