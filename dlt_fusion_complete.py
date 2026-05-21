@@ -30,6 +30,7 @@ from modules.dlt_game_theory import DLTGameTheoryAnalyzer
 from modules.dlt_genetic_optimizer import DLTGeneticOptimizer
 from modules.dlt_math_filter import DLTMathFilter
 from modules.dlt_statistics_analyzer import DLTStatisticsAnalyzer
+from modules.dlt_pattern_recognizer import DLTPatternRecognizer, apply_pattern_boost, generate_pattern_diversity_pool
 
 
 class DLTFusionComplete:
@@ -74,6 +75,14 @@ class DLTFusionComplete:
         self.genetic = DLTGeneticOptimizer(self.draws)
         self.math_filter = DLTMathFilter()
         self.stats = DLTStatisticsAnalyzer(self.draws)
+
+        # 6. 初始化跨期模式识别器
+        self.pattern_recognizer = DLTPatternRecognizer(self.draws)
+        try:
+            self.pattern_recognizer.build_distributions(window=500)
+            print(f"[DLT-Fusion] 🧩 跨期模式识别器初始化完成 (500期分布)")
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 模式识别器初始化失败: {e}")
 
         # 初始化遗传算法
         try:
@@ -172,8 +181,13 @@ class DLTFusionComplete:
         # Step 1: SFE 5组融合
         all_groups = self.get_group_recommendations()
 
-        # Step 2: 五池采样补充候选
+        # Step 2: 五池采样补充候选 + 模式池采样
         pool_candidates = self._sample_pool_candidates(n_per_pool=2)
+        try:
+            pattern_candidates = self._sample_pattern_pool_candidates()
+            pool_candidates.extend(pattern_candidates)
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 模式池采样跳过: {e}")
 
         # Step 3: 后区融合
         back_recs = self.get_back_recommendations()
@@ -187,8 +201,16 @@ class DLTFusionComplete:
         # Step 6: 汇总所有候选
         all_candidates = self._collect_candidates(all_groups, pool_candidates, gt_scores, genetic_scores)
 
-        # Step 7: 综合评分
+        # Step 7a: 常规综合评分 (base*0.4 + gt*0.3 + genetic*0.3)
         self._compute_final_scores(all_candidates)
+
+        # Step 7b: 跨期模式评分增强（方案二：叠加模式匹配度评分）
+        if hasattr(self, 'pattern_recognizer') and self.pattern_recognizer._is_built:
+            prev_front = self.draws[-1][0] if len(self.draws) >= 1 else None
+            all_candidates = apply_pattern_boost(
+                all_candidates, self.pattern_recognizer,
+                prev_front=prev_front, boost_weight=0.35
+            )
 
         # Step 7b: 过滤掉与最近一期完全相同的号码（不可能连续两期一模一样）
         all_candidates = self._filter_recent_draws(all_candidates)
@@ -421,6 +443,44 @@ class DLTFusionComplete:
 
         return candidates
 
+    def _sample_pattern_pool_candidates(self) -> List[Dict[str, Any]]:
+        """模式池采样：基于跨期模式识别生成候选"""
+        candidates = []
+        try:
+            front_pool, back_pool = self.pattern_recognizer.generate_pattern_pool(
+                n_front=12, n_back=4
+            )
+            # 从模式池中组合多个候选
+            import itertools, random
+            # 从前区池中生成多组候选
+            for i in range(3):
+                selected_front = sorted(random.sample(front_pool, 5))
+                selected_back = sorted(random.sample(back_pool, 2))
+                candidates.append({
+                    'front': selected_front,
+                    'back': selected_back,
+                    'source': 'pattern_pool',
+                    'total_score': 0.6,
+                    'strategy_name': '模式池-PatternPool',
+                })
+            # 也生成基于模式多样性的候选
+            front_div, back_div = generate_pattern_diversity_pool(
+                self.draws, n_front=12, n_back=4
+            )
+            for i in range(2):
+                selected_front = sorted(random.sample(front_div, 5))
+                selected_back = sorted(random.sample(back_div, 2))
+                candidates.append({
+                    'front': selected_front,
+                    'back': selected_back,
+                    'source': 'pattern_diversity',
+                    'total_score': 0.55,
+                    'strategy_name': '模式池-Diversity',
+                })
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 模式池候选失败: {e}")
+        return candidates
+
     def _apply_game_theory(
         self,
         all_groups: Dict[int, List[Any]],
@@ -494,36 +554,36 @@ class DLTFusionComplete:
         return genetic_scores
 
     def _chromosome_fitness(self, front: List[int], back: List[int]) -> float:
-        """计算组合适应度（模拟Chromosome评估）"""
+        """计算组合适应度（模拟Chromosome评估）- 已集成跨期模式评分"""
         fitness = 0.0
 
-        # 热号比例 (40%)
+        # 热号比例 (30%)
         hot_front = list(range(1, 20))
         hot_back = list(range(1, 8))
         front_hot = len(set(front) & set(hot_front)) / 5.0
         back_hot = len(set(back) & set(hot_back)) / 2.0
-        fitness += front_hot * 0.3 + back_hot * 0.1
+        fitness += front_hot * 0.2 + back_hot * 0.1
 
-        # 奇偶平衡 (20%)
+        # 奇偶平衡 (15%)
         front_odd = sum(1 for n in front if n % 2 == 1)
         back_odd = sum(1 for n in back if n % 2 == 1)
         front_odd_score = 1 - abs(front_odd - 3) / 3
         back_odd_score = 1 - abs(back_odd - 1.5) / 1.5
-        fitness += front_odd_score * 0.15 + back_odd_score * 0.05
+        fitness += front_odd_score * 0.10 + back_odd_score * 0.05
 
-        # 号码分布 (15%)
+        # 号码分布/跨度 (10%)
         front_spread = max(front) - min(front)
         spread_score = min(front_spread / 30, 1.0)
-        fitness += spread_score * 0.15
+        fitness += spread_score * 0.10
 
-        # 连号控制 (10%)
+        # 连号控制 (5%)
         front_sorted = sorted(front)
         consecutive = sum(
             1 for i in range(len(front_sorted) - 1)
             if front_sorted[i+1] - front_sorted[i] == 1
         )
         consecutive_score = 1 - min(consecutive / 2, 1.0)
-        fitness += consecutive_score * 0.10
+        fitness += consecutive_score * 0.05
 
         # 和值范围 (10%)
         front_sum = sum(front)
@@ -532,6 +592,16 @@ class DLTFusionComplete:
         else:
             sum_score = 1 - min(abs(front_sum - 110) / 50, 1.0)
         fitness += sum_score * 0.10
+
+        # 跨期模式匹配度 (30%) - 新增：方案二核心
+        if hasattr(self, 'pattern_recognizer') and self.pattern_recognizer._is_built:
+            try:
+                prev_front = self.draws[-1][0] if len(self.draws) >= 1 else None
+                score_result = self.pattern_recognizer.score_combo(front, prev_front)
+                pattern_fitness = score_result['total_score']
+                fitness += pattern_fitness * 0.30
+            except Exception:
+                pass  # 模式评分失败，用其他维度补
 
         return max(0.0, min(1.0, fitness))
 
