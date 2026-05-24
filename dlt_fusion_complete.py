@@ -36,23 +36,10 @@ from modules.dlt_pattern_recognizer import DLTPatternRecognizer, apply_pattern_b
 class DLTFusionComplete:
     """DLT多策略融合完全体 — 整合所有预测模块的统一入口"""
 
-    def __init__(self, data_path: Optional[str] = None, auto_update: bool = True):
+    def __init__(self, data_path: Optional[str] = None):
         if data_path is None:
             data_path = data_dir()
         self.data_path = data_path
-
-        # 0. 自动检查/更新数据
-        if auto_update:
-            try:
-                from dlt_data_updater import check_and_update
-                update_result = check_and_update()
-                if update_result['updated']:
-                    print(f"[DLT-Fusion] 📥 数据已自动更新: +{update_result['new_count']}期 "
-                          f"({update_result['new_periods'][0]}~{update_result['new_periods'][-1]})")
-                else:
-                    print(f"[DLT-Fusion] ✅ 数据已是最新 (最新期号: {update_result['last_period']})")
-            except Exception as e:
-                print(f"[DLT-Fusion] ⚠️ 数据更新检查跳过: {e}")
 
         # 1. 加载数据（带fallback）
         self.draws = self._load_data(data_path)
@@ -90,7 +77,7 @@ class DLTFusionComplete:
         except Exception as e:
             print(f"[DLT-Fusion] 遗传算法初始化: {e}")
 
-        print(f"[DLT-Fusion] 初始化完成 | V1.0完全体")
+        print(f"[DLT-Fusion] 初始化完成 | V1.1完全体")
 
     def _load_data(self, path: str) -> List[Tuple[List[int], List[int]]]:
         """加载数据，支持多种fallback"""
@@ -125,6 +112,21 @@ class DLTFusionComplete:
     # ------------------------------------------------------------------
     # 公共接口
     # ------------------------------------------------------------------
+
+    def _reinit_submodules(self):
+        """数据更新后重新初始化所有子模块"""
+        try:
+            self.sfe = StrategyFusionEngine(self.draws, n_groups=5)
+            self.pool_sampler = FivePoolSampler(self.draws)
+            self.back_fusion = BackZoneFusion(self.draws)
+            self.genetic = DLTGeneticOptimizer(self.draws)
+            self.stats = DLTStatisticsAnalyzer(self.draws)
+            self.pattern_recognizer = DLTPatternRecognizer(self.draws)
+            self.pattern_recognizer.build_distributions(window=500)
+            self.genetic.evolve(generations=50, verbose=False)
+            print(f"[DLT-Fusion] 🔄 子模块已基于新数据重新初始化 ({len(self.draws)}期)")
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 子模块重初始化失败: {e}")
 
     def get_group_recommendations(self) -> Dict[int, List[Any]]:
         """获取5组独立推荐"""
@@ -177,7 +179,22 @@ class DLTFusionComplete:
             return {'6+3': bet_map['6+3']()}
 
     def predict(self, top_n: int = 5, include_compound: bool = True) -> Dict[str, Any]:
-        """主预测函数：多策略融合最终推荐"""
+        """主预测函数：触发预测时自动同步最新开奖数据，然后生成推荐"""
+        # Step 0: 触发预测时同步最新开奖数据
+        try:
+            from dlt_data_updater import check_and_update
+            update_result = check_and_update()
+            if update_result['updated']:
+                print(f"[DLT-Fusion] 📥 已同步新数据: +{update_result['new_count']}期 "
+                      f"({update_result['new_periods'][0]}~{update_result['new_periods'][-1]})")
+                # 数据有更新，重新加载子模块
+                self.draws = self._load_data(self.data_path)
+                self._reinit_submodules()
+            else:
+                print(f"[DLT-Fusion] ✅ 数据已是最新 (最新期号: {update_result['last_period']})")
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 数据更新检查跳过: {e}")
+
         # Step 1: SFE 5组融合
         all_groups = self.get_group_recommendations()
 

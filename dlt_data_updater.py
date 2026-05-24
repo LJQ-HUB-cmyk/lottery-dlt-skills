@@ -24,6 +24,9 @@ DATA_PATH = SKILL_DIR / 'data' / 'DLT历史数据_适配模型版.xlsx'
 # gameNo=85 是超级大乐透
 API_URL = 'https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry'
 
+# 500彩票网数据源（备选）
+API_URL_500COM = 'https://datachart.500.com/dlt/history/newinc/history.php'
+
 
 def _build_url(page_no: int = 1, page_size: int = 30) -> str:
     """构建体彩数据API请求URL"""
@@ -31,7 +34,7 @@ def _build_url(page_no: int = 1, page_size: int = 30) -> str:
             f'&isPc=true&pageNo={page_no}')
 
 
-def _http_get(url: str, timeout: int = 15) -> str:
+def _http_get(url: str, timeout: int = 15, referer: str = 'https://www.lottery.gov.cn/') -> str:
     """HTTP GET请求（带SSL绕过和浏览器UA）"""
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -44,8 +47,7 @@ def _http_get(url: str, timeout: int = 15) -> str:
             'Chrome/120.0.0.0 Safari/537.36'
         ),
         'Accept': 'application/json, text/plain, */*',
-        'Referer': 'https://www.lottery.gov.cn/',
-        'Origin': 'https://www.lottery.gov.cn',
+        'Referer': referer,
     })
 
     with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
@@ -103,6 +105,128 @@ def fetch_draws_from_api(page_no: int = 1, page_size: int = 30) -> List[dict]:
         print(f"[DLT-Updater] API请求失败: {e}")
         return []
 
+
+# ——— 500彩票网数据源（备选） ———
+
+def _http_get_500com(timeout: int = 20) -> str:
+    """500.com专用HTTP请求（不同referer和更长的超时）"""
+    url = f'{API_URL_500COM}?start=7001&end=99999'
+    return _http_get(url, timeout=timeout, referer='https://www.500.com/')
+
+
+def parse_500com_html(html: str) -> List[dict]:
+    """
+    解析500彩票网HTML表格，提取大乐透开奖数据
+
+    HTML结构（每行首列被注释隐藏）:
+    <tr class="t_tr1">
+        <!--<td>序号</td>--><td class="t_tr1">期号</td>
+        <td class="cfont2">前区1</td> ... <td class="cfont2">前区5</td>
+        <td class="cfont4">后区1</td>
+        <td class="cfont4">后区2</td>
+        ...
+    </tr>
+    """
+    # 先去掉HTML注释，避免干扰
+    clean = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
+
+    results = []
+    # 匹配每个数据行
+    row_pattern = re.compile(
+        r'<tr\s+class="t_tr1">(.*?)</tr>', re.DOTALL
+    )
+    # 提取所有td中的纯数字
+    td_pattern = re.compile(r'<td[^>]*>(\d+)</td>')
+
+    for row in row_pattern.finditer(clean):
+        cells = td_pattern.findall(row.group(1))
+        # 需要至少7个有效数字列：期号 + 前区5 + 后区2
+        if len(cells) < 7:
+            continue
+
+        try:
+            period = int(cells[0])
+            front = [int(cells[i]) for i in range(1, 6)]
+            back = [int(cells[6]), int(cells[7])]
+
+            # 验证范围
+            if not all(1 <= n <= 35 for n in front):
+                continue
+            if not all(1 <= n <= 12 for n in back):
+                continue
+
+            results.append({
+                '期号': period,
+                '前区1': front[0], '前区2': front[1],
+                '前区3': front[2], '前区4': front[3],
+                '前区5': front[4],
+                '后区1': back[0], '后区2': back[1],
+            })
+        except (ValueError, IndexError):
+            continue
+
+    if results:
+        # 按期号升序排列
+        results.sort(key=lambda x: x['期号'])
+        # 去重
+        seen = set()
+        unique = []
+        for d in results:
+            pid = d['期号']
+            if pid not in seen:
+                seen.add(pid)
+                unique.append(d)
+        results = unique
+
+    return results
+
+
+def fetch_draws_from_500com() -> List[dict]:
+    """
+    从500彩票网获取大乐透历史开奖数据（HTML表格解析）
+    作为体彩数据API的备用数据源
+
+    Returns:
+        [{'期号': int, '前区1'~'前区5': int, '后区1': int, '后区2': int}, ...]
+    """
+    try:
+        html = _http_get_500com()
+        draws = parse_500com_html(html)
+        if draws:
+            print(f"[DLT-Updater] 500彩票网获取到 {len(draws)} 期数据 "
+                  f"({draws[0]['期号']}~{draws[-1]['期号']})")
+        else:
+            print(f"[DLT-Updater] 500彩票网未解析到有效数据")
+        return draws
+    except Exception as e:
+        print(f"[DLT-Updater] 500彩票网请求失败: {e}")
+        return []
+
+
+def fetch_new_500com(last_period: int) -> List[dict]:
+    """
+    从500彩票网获取比 last_period 更新的所有期号
+
+    Returns:
+        List[dict]: 新数据，按期号升序排列
+    """
+    all_draws = fetch_draws_from_500com()
+    if not all_draws:
+        return []
+
+    # 过滤出新数据
+    new_draws = [d for d in all_draws if d['期号'] > last_period]
+    if new_draws:
+        print(f"[DLT-Updater] 500彩票网发现 {len(new_draws)} 期新数据: "
+              f"{new_draws[0]['期号']}~{new_draws[-1]['期号']}")
+    else:
+        current_max = max(d['期号'] for d in all_draws)
+        print(f"[DLT-Updater] 数据已是最新 (最新期号: {current_max})")
+
+    return new_draws
+
+
+# ——— 主要获取逻辑（sporttery → 500com 双源） ———
 
 def fetch_new_draws(last_period: int) -> List[dict]:
     """
@@ -241,7 +365,15 @@ def check_and_update() -> dict:
 
     print(f"[DLT-Updater] 当前数据文件: {first} ~ {last} ({get_total()}期)")
 
+    # 优先使用体彩数据API
     new_draws = fetch_new_draws(last)
+    source = 'sporttery'
+
+    # 体彩失败则fallback到500彩票网
+    if not new_draws:
+        print(f"[DLT-Updater] ⚠️ 体彩数据API无数据，尝试500彩票网...")
+        new_draws = fetch_new_500com(last)
+        source = '500com'
 
     if not new_draws:
         return {
@@ -251,7 +383,7 @@ def check_and_update() -> dict:
             'first_period': first,
             'total': get_total(),
             'new_periods': [],
-            'source': 'sporttery',
+            'source': source,
         }
 
     count = append_draws(new_draws)
@@ -264,7 +396,7 @@ def check_and_update() -> dict:
         'first_period': first,
         'total': get_total(),
         'new_periods': new_periods,
-        'source': 'sporttery',
+        'source': source,
     }
 
 
