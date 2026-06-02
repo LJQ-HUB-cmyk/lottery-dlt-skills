@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-DLT多策略融合完全体 V2.0
-整合策略融合引擎 + 五池采样 + 后区融合 + 博弈论 + 遗传算法 + 数学过滤 + 统计分析
-+ 隔期重号增强(SkipRepeatBooster) + 双期参考候选 + 后区隔期重号 + 智能重号惩罚
+DLT多策略融合完全体 V2.1.0
+整合策略融合引擎 + 六池采样 + 后区融合 + 博弈论 + 遗传算法 + 数学过滤 + 统计分析
++ 隔期重号增强(SkipRepeatBooster) + 双期参考候选 + 后区隔期重号 + 智能重号惩罚 + 趋势池+尾号检测+AC值+偏差校准
 """
 
 import sys
@@ -435,8 +435,15 @@ class DLTFusionComplete:
             print(f"[DLT-Fusion] ⚠️ 隔期重号评分跳过: {e}")
 
         # Step 7c: 重号惩罚——候选与上期重号≥3个时降分5%，避免热号过度堆叠
-        # 【方案D】区分预期重号vs热号堆叠
         all_candidates = self._apply_repeat_penalty(all_candidates)
+
+        # Step 7c2: 特征工程——尾号聚合检测 + AC值跟踪评分
+        all_candidates = self._apply_tail_density_scoring(all_candidates)
+        all_candidates = self._apply_ac_value_scoring(all_candidates)
+
+        # Step 7c3: 偏差仪表盘 + 置信度重校准
+        dashboard = self._compute_deviation_dashboard(all_candidates)
+        all_candidates = self._recalibrate_confidence(all_candidates, dashboard)
 
         # Step 7d: 过滤掉与最近一期完全相同的号码（不可能连续两期一模一样）
         all_candidates = self._filter_recent_draws(all_candidates)
@@ -1061,26 +1068,38 @@ class DLTFusionComplete:
 
     def _apply_repeat_penalty(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        智能重号惩罚（方案D升级版）：区分预期重号与热号堆叠。
+        【优化 V2.1】智能重号惩罚（动态判断版）
 
-        核心改进：
-        1. 单号码高概率重号（如上期开出的34在26058延续出现）→ 不应惩罚
-        2. 多个热号无理由堆叠 → 惩罚
+        删除"期望重号1个"的固定预期，改为基于上期和值的动态判断：
+        - 上期和值偏高(>120) → 倾向于无重号（大和值后号码切换概率高）
+        - 上期和值偏低(<70) → 倾向于0-1个重号
+        - 上期和值中等(70-120) → 正常处理
 
-        判定逻辑：
-        - 计算候选与上期的每个重叠号码的"冷热度"：
-          - 冷号重号（该号码近期未密集出现）：预期重号，不惩罚
-          - 热号重号（该号码近期已频繁出现）：热号堆叠，惩罚
+        区分预期重号与热号堆叠判定逻辑：
         - 重叠数≥3且其中热号重号占多数（≥2个热号）→ 5%折扣
         - 重叠数≥3但以冷号为主（≤1个热号）→ 视为正常趋势，不打折
-        - 重叠数为3中恰好包含1-2个"间隔性出现"的号码时，做中性处理
 
-        冷热度判定：号码在最近10期出现≥4次 = 热号（过热范围）
+        冷热度判定：号码在最近10期出现≥4次 = 热号
         """
         if len(self.draws) < 2:
             return candidates
 
         latest_front = set(self.draws[-1][0])
+        latest_sum = sum(self.draws[-1][0])
+
+        # ---- 动态重号预期 ----
+        # 上期和值高(>120) → 强烈预期无重号，降低所有重号容忍度
+        # 上期和值低(<70) → 温和预期少重号
+        # 上期和值中 → 正常
+        if latest_sum > 120:
+            repeat_expected = 0        # 无重号预期
+            repeat_tolerance = 1        # 最多容忍1个重号
+        elif latest_sum < 70:
+            repeat_expected = 0
+            repeat_tolerance = 2
+        else:
+            repeat_expected = 1
+            repeat_tolerance = 2
 
         # 计算最近10期每个号码的出现频率
         recent_window = 10
@@ -1088,7 +1107,6 @@ class DLTFusionComplete:
         for i in range(max(0, len(self.draws) - recent_window), len(self.draws)):
             recent_front_all.extend(self.draws[i][0])
         num_freq = Counter(recent_front_all)
-        # 热号阈值：最近10期出现≥4次
         HOT_FREQ_THRESHOLD = 4
 
         penalty_count = 0
@@ -1109,25 +1127,30 @@ class DLTFusionComplete:
             orig = c.get('final_score', c.get('base_score', 0.5))
 
             if hot_overlaps >= 2:
-                # 热号堆叠（≥2个热号与上期重复）：5%折扣
-                c['final_score'] = orig * 0.95
+                # 热号堆叠（≥2个热号与上期重复）
+                if repeat_expected == 0 and overlap >= 2:
+                    # 高和值期+热号堆叠 → 强惩罚10%
+                    c['final_score'] = orig * 0.90
+                else:
+                    c['final_score'] = orig * 0.95
                 penalty_count += 1
                 if penalty_count <= 3:
                     print(f"[DLT-Fusion] 🔽 热号堆叠惩罚: 前区{c.get('front', [])} "
-                          f"重叠{overlap}个(热{hot_overlaps}/冷{cold_overlaps}) "
+                          f"重叠{overlap}个(热{hot_overlaps}/冷{cold_overlaps}, "
+                          f"上期和值={latest_sum}, 预期重号={repeat_expected}) "
                           f"(score: {orig:.4f}→{c['final_score']:.4f})")
-            elif cold_overlaps >= 2:
-                # 冷号/间隔性重号为主：视为趋势延续，小幅加分鼓励
+            elif cold_overlaps >= 2 and overlap <= repeat_tolerance:
+                # 冷号重号为主且不超出容忍 → 视为趋势延续，小幅加分鼓励
                 c['final_score'] = orig * 1.03
                 neutral_count += 1
                 if neutral_count <= 3:
                     print(f"[DLT-Fusion] ✅ 趋势延续识别: 前区{c.get('front', [])} "
                           f"重叠{overlap}个(热{hot_overlaps}/冷{cold_overlaps}) "
                           f"(score: {orig:.4f}→{c['final_score']:.4f})")
-            # else: 混合型（1热1冷等），不做调整
 
         if penalty_count > 0:
-            print(f"[DLT-Fusion] 🔽 重号惩罚(方案D)合计: {penalty_count}注受折扣")
+            print(f"[DLT-Fusion] 🔽 重号惩罚(方案D-动态)合计: {penalty_count}注受折扣 "
+                  f"(上期和值={latest_sum}, 预期重号={repeat_expected})")
         if neutral_count > 0:
             print(f"[DLT-Fusion] ✅ 趋势延续识别合计: {neutral_count}注受加成")
 
@@ -1192,19 +1215,244 @@ class DLTFusionComplete:
                 if periods:
                     return str(periods[-1]) if not isinstance(periods[-1], int) else str(periods[-1])
             if hasattr(self.draws[0][0], '__len__') and len(self.draws) > 0:
-                return None  # 无法从draws直接获取期号
+                return None
         except Exception:
             pass
         return None
 
+    # ==================================================================
+    # 【优化 V2.1.0】特征工程补充：尾号聚合检测 + AC值跟踪
+    # ==================================================================
 
-# ---------------------------------------------------------------------------
-# 入口函数
-# ---------------------------------------------------------------------------
+    def _apply_tail_density_scoring(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        尾号聚合检测：评估候选号码的尾号分布密集度。
+
+        逻辑：
+        - 计算候选前区的尾号集合（号码个位数）
+        - 正常分布应有4-5个不同尾号（含1个重复尾号）
+        - 尾号分布过于集中（≤3个不同尾号）→ 降分
+        - 有1个重复尾号(4个不同尾号) → 正常，小幅加分
+
+        评分调整幅度：±3%
+        """
+        for c in candidates:
+            front = c.get('front', [])
+            if not front or len(front) < 5:
+                continue
+
+            tails = [n % 10 for n in front]
+            unique_tails = len(set(tails))
+
+            orig = c.get('final_score', c.get('base_score', 0.5))
+
+            if unique_tails <= 3:
+                c['final_score'] = orig * 0.97
+                c['tail_density_adj'] = -0.03
+            elif unique_tails == 5:
+                pass
+            elif unique_tails == 4:
+                c['final_score'] = orig * 1.01
+                c['tail_density_adj'] = 0.01
+
+        return candidates
+
+    def _apply_ac_value_scoring(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        AC值跟踪评分：基于历史AC值分布调整候选评分。
+
+        逻辑：
+        - 统计最近100期的AC值分布
+        - 计算AC值的概率密度
+        - AC值在历史高频区间(通常4-8)的候选加分
+        - AC值在低频区间的候选减分
+        """
+        # 统计最近100期AC值分布
+        window = min(100, len(self.draws))
+        ac_values = []
+        for i in range(max(0, len(self.draws) - window), len(self.draws)):
+            front = self.draws[i][0]
+            diffs = set()
+            for j in range(len(front)):
+                for k in range(j + 1, len(front)):
+                    diffs.add(abs(front[k] - front[j]))
+            ac = len(diffs) - (len(front) - 1)
+            ac_values.append(ac)
+
+        from collections import Counter as _Counter
+        ac_dist = _Counter(ac_values)
+        total = sum(ac_dist.values()) or 1
+        ac_prob = {k: v / total for k, v in ac_dist.items()}
+        median_ac = sorted(ac_values)[len(ac_values) // 2] if ac_values else 6
+
+        for c in candidates:
+            front = c.get('front', [])
+            if not front or len(front) < 5:
+                continue
+
+            # 计算该候选的AC值
+            s = sorted(front)
+            diffs = set()
+            for i in range(len(s)):
+                for j in range(i + 1, len(s)):
+                    diffs.add(abs(s[j] - s[i]))
+            ac = len(diffs) - (len(s) - 1)
+
+            orig = c.get('final_score', c.get('base_score', 0.5))
+            prob = ac_prob.get(ac, 0.05)
+
+            # 调整幅度：基于概率的线性调整
+            if prob >= 0.15:
+                # 高频AC值 → 加1%
+                c['final_score'] = orig * 1.01
+                c['ac_adj'] = 0.01
+            elif prob <= 0.03:
+                # 低频AC值 → 减2%
+                c['final_score'] = orig * 0.98
+                c['ac_adj'] = -0.02
+            # 中等频率 → 不做调整
+
+        return candidates
+
+    # ==================================================================
+    # 【优化 V2.1.0】融合模型输出校准：偏差仪表盘 + 置信度重校准
+    # ==================================================================
+
+    def _compute_deviation_dashboard(self, candidates: List[Dict[str, Any]]) -> Dict[str, float]:
+        """
+        偏差仪表盘：计算本轮候选集相对于历史数据的偏差指标。
+
+        四个核心指标：
+        1. 和值偏差(sum_deviation) — 候选平均和值 vs 最近20期平均和值
+        2. 跨度偏差(span_deviation) — 候选平均跨度 vs 最近20期平均跨度
+        3. 重号偏差(repeat_deviation) — 候选平均重号数 vs 最近20期平均重号数
+        4. 大小号偏差(size_deviation) — 候选平均大号占比 vs 最近20期平均大号占比
+        """
+        window = min(20, len(self.draws))
+        if len(self.draws) < window:
+            return {'sum_deviation': 0, 'span_deviation': 0,
+                    'repeat_deviation': 0, 'size_deviation': 0}
+
+        # 历史数据统计
+        recent = self.draws[-window:]
+        hist_sums = [sum(d[0]) for d in recent]
+        hist_spans = [max(d[0]) - min(d[0]) for d in recent]
+        hist_repeats = []
+        for i in range(1, len(recent)):
+            overlap = len(set(recent[i][0]) & set(recent[i - 1][0]))
+            hist_repeats.append(overlap)
+        hist_big = [sum(1 for n in d[0] if n >= 25) / 5.0 for d in recent]
+
+        avg_hist_sum = float(np.mean(hist_sums))
+        avg_hist_span = float(np.mean(hist_spans))
+        avg_hist_repeat = float(np.mean(hist_repeats)) if hist_repeats else 1
+        avg_hist_big = float(np.mean(hist_big))
+
+        # 候选数据统计
+        if not candidates:
+            return {'sum_deviation': 0, 'span_deviation': 0,
+                    'repeat_deviation': 0, 'size_deviation': 0}
+
+        cand_sums = [sum(c.get('front', [])) for c in candidates]
+        cand_spans = []
+        for c in candidates:
+            f = c.get('front', [])
+            cand_spans.append(max(f) - min(f) if f else 0)
+        cand_big = []
+        for c in candidates:
+            f = c.get('front', [])
+            cand_big.append(sum(1 for n in f if n >= 25) / 5.0 if f else 0)
+
+        avg_cand_sum = float(np.mean(cand_sums)) if cand_sums else 0
+        avg_cand_span = float(np.mean(cand_spans)) if cand_spans else 0
+        avg_cand_big = float(np.mean(cand_big)) if cand_big else 0
+
+        # 计算偏差值（标准化为-1到1）
+        sum_dev = (avg_cand_sum - avg_hist_sum) / max(avg_hist_sum, 1)
+        span_dev = (avg_cand_span - avg_hist_span) / max(avg_hist_span, 1)
+        repeat_dev = 0  # 无法直接计算候选重号数
+        size_dev = (avg_cand_big - avg_hist_big) / max(avg_hist_big, 0.1)
+
+        # 限制范围
+        sum_dev = max(-1.0, min(1.0, sum_dev))
+        span_dev = max(-1.0, min(1.0, span_dev))
+        size_dev = max(-1.0, min(1.0, size_dev))
+
+        dashboard = {
+            'sum_deviation': round(sum_dev, 4),
+            'span_deviation': round(span_dev, 4),
+            'repeat_deviation': round(repeat_dev, 4),
+            'size_deviation': round(size_dev, 4),
+            'avg_candidate_sum': round(avg_cand_sum, 1),
+            'avg_hist_sum': round(avg_hist_sum, 1),
+            'avg_candidate_span': round(avg_cand_span, 1),
+            'avg_hist_span': round(avg_hist_span, 1),
+            'avg_candidate_big_ratio': round(avg_cand_big, 3),
+            'avg_hist_big_ratio': round(avg_hist_big, 3),
+        }
+
+        print(f"[DLT-Fusion] 📊 偏差仪表盘: "
+              f"和值偏差={sum_dev:+.2%} (候选{avg_cand_sum:.0f}/历史{avg_hist_sum:.0f}), "
+              f"跨度偏差={span_dev:+.2%}, "
+              f"大号比偏差={size_dev:+.2%}")
+
+        return dashboard
+
+    def _recalibrate_confidence(self, candidates: List[Dict[str, Any]],
+                                 dashboard: Dict[str, float]) -> List[Dict[str, Any]]:
+        """
+        置信度重校准：基于偏差仪表盘调整最终评分。
+
+        当某维度候选与历史分布偏差过大时，该维度可能采样不足，
+        需要微调评分来覆盖被低估的方向。
+
+        校准规则：
+        - sum_deviation > +0.30 → 候选和值偏高，给低和值候选微加1%
+        - sum_deviation < -0.30 → 候选和值偏低，给高和值候选微加1%
+        - size_deviation > +0.30 → 大号偏多，给偏大号组合加1%
+        - size_deviation < -0.30 → 小号偏多，给偏小号组合加1%
+        """
+        sum_dev = dashboard.get('sum_deviation', 0)
+        size_dev = dashboard.get('size_deviation', 0)
+
+        cal_count = 0
+        for c in candidates:
+            front = c.get('front', [])
+            if not front:
+                continue
+
+            orig = c.get('final_score', c.get('base_score', 0.5))
+            front_sum = sum(front)
+            big_ratio = sum(1 for n in front if n >= 25) / 5.0
+
+            # 和值校准
+            if sum_dev > 0.30 and front_sum < 90:
+                # 候选整体偏高，给低和值组合加分
+                c['final_score'] = orig * 1.01
+                cal_count += 1
+            elif sum_dev < -0.30 and front_sum > 110:
+                # 候选整体偏低，给高和值组合加分
+                c['final_score'] = orig * 1.01
+                cal_count += 1
+
+            # 大小号校准
+            if size_dev > 0.30 and big_ratio <= 0.2:
+                # 候选大号偏多，给小号组合加分
+                c['final_score'] = orig * 1.01
+                cal_count += 1
+            elif size_dev < -0.30 and big_ratio >= 0.6:
+                # 候选小号偏多，给大号组合加分
+                c['final_score'] = orig * 1.01
+                cal_count += 1
+
+        if cal_count > 0:
+            print(f"[DLT-Fusion] 🔄 置信度重校准: 共调整{cal_count}注 (偏差补偿)")
+
+        return candidates
 
 def main():
     print("=" * 60)
-    print("  DLT多策略融合完全体 V1.0")
+    print("  DLT多策略融合完全体 V2.1.0")
     print("=" * 60)
 
     data_path = data_dir()

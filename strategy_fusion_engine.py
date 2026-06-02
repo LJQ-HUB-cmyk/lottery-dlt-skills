@@ -302,7 +302,7 @@ def build_group_strategies(fe: DLTFeatureExtractor) -> List[GroupStrategy]:
     strategies.append(GroupStrategy(
         group_id=1, name="热号重号均衡", description="热号+重号+奇偶均衡+小三区+遗漏",
         dimensions=dim1,
-        hard_constraints=HardConstraints(sum_range=(80,110), parity_ratios=['3:2','2:3'],
+        hard_constraints=HardConstraints(sum_range=(80,110), parity_ratios=['3:2','2:3','4:1','1:4'],
             span_range=(20,32), ac_min=6, zone_required=True, consecutive_allowed=(1,2)),
         soft_constraints=SoftConstraints(sum_prefer=(88,102), parity_prefer='3:2',
             span_prefer=(24,28), ac_prefer=8, cooc_boost=True, zone_prefer='221'),

@@ -7,6 +7,7 @@
 import numpy as np
 import random
 from typing import List, Dict, Tuple, Any, Optional
+from collections import Counter
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -282,12 +283,113 @@ class FivePoolSampler:
         
         print(f"🧬 生成{zone}遗传池: {genetic_pool}")
         return genetic_pool
-    
+
+    # ------------------------------------------------------
+    # 【优化 V2.1.0】趋势池: 基于和值趋势的号码加权
+    # 当近期和值持续偏高/偏低时，给予对应区间号码更高权重
+    # ------------------------------------------------------
+
+    def generate_trend_pool(self, n: int = 10, zone: str = 'front') -> List[int]:
+        """
+        趋势池：基于和值趋势修正的号码选择。
+
+        核心逻辑：
+        - 计算最近10期每期和值
+        - 判断和值趋势方向（上行/下行/稳定）
+        - 趋势上行 → 大号区(20+)权重提升
+        - 趋势下行 → 小号区(1-19)权重提升
+        - 趋势稳定 → 中号区(10-25)权重提升
+
+        Args:
+            n: 返回的号码数量
+            zone: 'front' 或 'back'
+
+        Returns:
+            List[int]: 趋势一致号码列表
+        """
+        if zone == 'back' or len(self.draws) < 10:
+            # 后区暂不启用趋势池，返回热号替代
+            return self.generate_hot_pool(n, zone)
+
+        front_draws = self.front_balls
+        recent = front_draws[-10:] if len(front_draws) >= 10 else front_draws
+
+        # 计算每期和值
+        sums = [sum(d) for d in recent]
+        avg_sum = np.mean(sums)
+
+        # 判断趋势方向：比较最近3期均值 vs 之前7期均值
+        if len(sums) >= 10:
+            recent3 = np.mean(sums[-3:])
+            prior7 = np.mean(sums[:-3])
+            diff = recent3 - prior7
+            if diff > 8:
+                direction = 'up'
+                strength = min(diff / 20, 1.0)
+            elif diff < -8:
+                direction = 'down'
+                strength = min(abs(diff) / 20, 1.0)
+            else:
+                direction = 'stable'
+                strength = 0.3
+        else:
+            direction = 'stable'
+            strength = 0.3
+
+        # 基于趋势方向给每个号码打分
+        scores = {}
+        for num in range(1, 36):
+            base = 0.5
+            if direction == 'up':
+                # 大号区(20+)加分，小号区(1-9)减分
+                if num >= 28:
+                    bonus = strength * 0.8
+                elif num >= 20:
+                    bonus = strength * 0.4
+                elif num <= 9:
+                    bonus = -strength * 0.3
+                else:
+                    bonus = 0
+            elif direction == 'down':
+                # 小号区加分，大号区减分
+                if num <= 9:
+                    bonus = strength * 0.8
+                elif num <= 19:
+                    bonus = strength * 0.4
+                elif num >= 28:
+                    bonus = -strength * 0.3
+                else:
+                    bonus = 0
+            else:  # stable
+                # 中号区(10-25)加分
+                if 10 <= num <= 25:
+                    bonus = strength * 0.5
+                else:
+                    bonus = 0
+            scores[num] = base + bonus
+
+        # 补充实际出现频率——最近10期出现过的号码额外加权
+        recent_nums = Counter()
+        for draw in recent:
+            for num in draw:
+                recent_nums[num] += 1
+        max_freq = max(recent_nums.values()) if recent_nums else 1
+        for num in range(1, 36):
+            freq_bonus = recent_nums.get(num, 0) / max_freq * 0.3
+            scores[num] += freq_bonus
+
+        # 排序输出
+        sorted_nums = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        trend_pool = [num for num, _ in sorted_nums[:n]]
+
+        print(f"📈 生成{zone}趋势池: {trend_pool} (方向={direction}, 强度={strength:.2f}, 均和值={avg_sum:.0f})")
+        return trend_pool
+
     def stratified_sample(self, n_combinations: int = 5, zone: str = 'front') -> List[List[int]]:
         """
-        分层采样：5池各取一定比例，生成n组不同组合
-        
-        采样比例：热号40% + 冷号20% + 均衡25% + 博弈10% + 遗传5%
+        分层采样：5池+趋势池各取一定比例，生成n组不同组合
+
+        采样比例：热号30% + 冷号15% + 均衡20% + 博弈10% + 遗传5% + 趋势20%
         
         Args:
             n_combinations: 生成的组合数量
@@ -302,6 +404,7 @@ class FivePoolSampler:
         balance_pool = self.generate_balance_pool(20, zone)
         game_pool = self.generate_game_theory_pool(20, zone)
         genetic_pool = self.generate_genetic_pool(20, zone)
+        trend_pool = self.generate_trend_pool(20, zone)
         
         # 确定组合大小
         if zone == 'front':
@@ -314,6 +417,7 @@ class FivePoolSampler:
         balance_pool = [n for n in balance_pool if n not in set(hot_pool) | set(cold_pool)]
         game_pool = [n for n in game_pool if n not in set(hot_pool) | set(cold_pool) | set(balance_pool)]
         genetic_pool = [n for n in genetic_pool if n not in set(hot_pool) | set(cold_pool) | set(balance_pool) | set(game_pool)]
+        trend_pool = [n for n in trend_pool if n not in set(hot_pool) | set(cold_pool) | set(balance_pool) | set(game_pool) | set(genetic_pool)]
         
         combinations = []
         
@@ -331,21 +435,23 @@ class FivePoolSampler:
                         combo.extend(picks)
                         seen.update(picks)
             
-            # 热号池贡献40%
-            add_pool(hot_pool, int(combo_size * 0.4))
-            # 冷号池贡献20%
-            add_pool(cold_pool, int(combo_size * 0.2))
-            # 均衡池贡献25%
-            add_pool(balance_pool, int(combo_size * 0.25))
-            # 博弈池贡献10%
-            add_pool(game_pool, int(combo_size * 0.1))
-            # 遗传池贡献5%
+            # 热号池贡献30%（从40%下调）
+            add_pool(hot_pool, int(combo_size * 0.30))
+            # 冷号池贡献15%（从20%下调）
+            add_pool(cold_pool, int(combo_size * 0.15))
+            # 均衡池贡献20%（从25%下调）
+            add_pool(balance_pool, int(combo_size * 0.20))
+            # 博弈池贡献10%（不变）
+            add_pool(game_pool, int(combo_size * 0.10))
+            # 遗传池贡献5%（不变）
             add_pool(genetic_pool, int(combo_size * 0.05))
+            # 趋势池贡献20%（新增）
+            add_pool(trend_pool, int(combo_size * 0.20))
             
-            # 补足到combo_size（从热号池优先补充已去重的号码）
+            # 补足到combo_size（从趋势池优先补充已去重的号码）
             if len(combo) < combo_size:
                 needed = combo_size - len(combo)
-                available = [num for num in hot_pool if num not in seen]
+                available = [num for num in trend_pool if num not in seen]
                 if len(available) >= needed:
                     picks = random.sample(available, needed)
                     combo.extend(picks)

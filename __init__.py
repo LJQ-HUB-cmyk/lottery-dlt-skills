@@ -1,4 +1,4 @@
-# DLT大乐透预测技能 - Python包入口 V1.0
+# DLT大乐透预测技能 - Python包入口 V2.1.0
 # 多策略融合完全体，所有模块统一从这里导出
 
 # 确保本包目录在模块搜索路径最前面
@@ -14,7 +14,7 @@ if _pkg_dir not in _sys.path:
 from dlt_predictor_upgraded import DLTPredictorUpgraded as DLTPredictor, predict_6_plus_4_v3
 
 # ============================================================
-# 多策略融合引擎（V1.0 核心）
+# 多策略融合引擎（V2.1.0 核心）
 # ============================================================
 from strategy_fusion_engine import StrategyFusionEngine
 from five_pool_sampler_complete_final import FivePoolSampler

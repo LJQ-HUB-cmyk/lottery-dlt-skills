@@ -1,6 +1,6 @@
 # DLT彩票预测技能
 name: dlt-lottery-prediction
-version: 1.0.0
+version: 2.1.0
 description: 中国体育彩票超级大乐透（DLT）预测技能，基于深度学习的彩票号码预测系统
 author: 贾维斯 (J.A.R.V.I.S.)
 license: MIT

@@ -99,6 +99,19 @@ STRATEGY_CONFIGS: Dict[int, Dict] = {
         "soft_consecutive_max": 3,
         "soft_sum_ideal": (70, 95),
     },
+    # 【优化 V2.1.0】策略6: 温和全偶/全奇约束 — 保留全偶(0:5)和全奇(5:0)小众路径
+    6: {  # 小众均衡
+        "name": "小众均衡策略（含全偶/全奇路径）",
+        "hard_sum_range": (55, 145),
+        "hard_zone_required": False,
+        "hard_span_min": 15,
+        "soft_ac_range": (4, 10),
+        "soft_consecutive_min": 0,
+        "soft_consecutive_max": 3,
+        "soft_sum_ideal": (70, 130),
+        "allow_all_odd": True,
+        "allow_all_even": True,
+    },
 }
 
 
@@ -207,7 +220,14 @@ class DLTConstraintEngine:
             odd = sum(1 for n in front if n % 2 == 1)
             even = len(front) - odd
             target = cfg["hard_odd_even"]
-            if (odd, even) != target and (odd, even) != (target[1], target[0]):
+            # 检查是否允许全奇/全偶（策略6小众路径）
+            allow_all_odd = cfg.get("allow_all_odd", False)
+            allow_all_even = cfg.get("allow_all_even", False)
+            if even == 5 and allow_all_even:
+                pass  # 允许全偶
+            elif odd == 5 and allow_all_odd:
+                pass  # 允许全奇
+            elif (odd, even) != target and (odd, even) != (target[1], target[0]):
                 return False, f"奇偶比({odd}:{even})不符合策略要求"
 
         # 跨度

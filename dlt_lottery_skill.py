@@ -444,7 +444,7 @@ class DLTLotterySkill:
         """获取技能信息"""
         return {
             'skill_name': 'dlt-lottery-prediction',
-            'version': '1.0.0',
+            'version': '2.1.0',
             'description': '中国体育彩票超级大乐透(DLT)预测技能',
             'constraints': [
                 '数据文件:data/DLT历史数据_适配模型版.xlsx',
