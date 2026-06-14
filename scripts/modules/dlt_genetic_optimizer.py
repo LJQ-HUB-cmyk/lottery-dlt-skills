@@ -33,11 +33,11 @@ class DLTGeneticOptimizer:
     """DLT遗传算法优化器"""
     
     def __init__(self, 
-                 population_size: int = 100,
-                 generations: int = 50,
+                 population_size: int = 30,
+                 generations: int = 15,
                  crossover_rate: float = 0.8,
                  mutation_rate: float = 0.2,
-                 elite_size: int = 10):
+                 elite_size: int = 5):
         """初始化遗传算法优化器"""
         self.population_size = population_size
         self.generations = generations

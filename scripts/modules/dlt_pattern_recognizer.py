@@ -243,6 +243,24 @@ class DLTPatternRecognizer:
             cc = self.extract_consecutive_count(f)
             consecutive_counter[cc] += 1
         
+        # 【V3.1.1】三联号≥3检测：统计连续3个及以上号码簇的出现频率
+        multi_consecutive_counter = Counter()
+        for f in front_history:
+            s = sorted(f)
+            max_run = 1
+            current_run = 1
+            for i in range(len(s) - 1):
+                if s[i+1] - s[i] == 1:
+                    current_run += 1
+                    max_run = max(max_run, current_run)
+                else:
+                    current_run = 1
+            multi_consecutive_counter[max_run] += 1
+        self._multi_consecutive_dist = {
+            'counter': multi_consecutive_counter,
+            'total': len(front_history),
+        }
+        
         # 3. 和值分布（按5分组）
         sum_counter = Counter()
         for f in front_history:
@@ -400,6 +418,26 @@ class DLTPatternRecognizer:
         detail['consecutive'] = cc_prob * dist['weight']
         weighted_sum += cc_prob * dist['weight']
         total_weight += dist['weight']
+
+        # 【V3.1.1】三联号(≥3个连续)匹配度增强
+        if hasattr(self, '_multi_consecutive_dist'):
+            s = sorted(front)
+            max_run = 1
+            current_run = 1
+            for i in range(len(s) - 1):
+                if s[i+1] - s[i] == 1:
+                    current_run += 1
+                    max_run = max(max_run, current_run)
+                else:
+                    current_run = 1
+            mc_dist = self._multi_consecutive_dist
+            mc_prob = mc_dist['counter'].get(max_run, 0) / max(mc_dist['total'], 1)
+            if max_run >= 3:
+                # 三连号出现概率×1.5倍权重补偿（三连号实际概率低但出现时信号强）
+                mc_score = mc_prob * 0.15 * 1.5
+                detail['multi_consecutive'] = mc_score
+                weighted_sum += mc_score
+                total_weight += 0.15
         
         # 3. 和值匹配度
         dist = self._pattern_distributions['sum']

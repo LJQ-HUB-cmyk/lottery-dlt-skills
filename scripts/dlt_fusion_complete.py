@@ -11,18 +11,20 @@ import os.path as _path
 import json
 import random
 import warnings
+import time as _time
 warnings.filterwarnings('ignore')
 
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Tuple, Optional, Any
 from collections import Counter, defaultdict
+from dlt_data_updater import check_and_update
 
 # ============================================================
 # 版本与参考文件同步
 # ============================================================
-VERSION = "3.1.0"
-RELEASE_DATE = "2026-06-12"
+VERSION = "3.1.1"
+RELEASE_DATE = "2026-06-14"
 
 
 def check_reference_sync():
@@ -81,6 +83,42 @@ class DLTFusionComplete:
 
         print(f"[DLT-Fusion] 历史数据加载完成 | 共{len(self.draws)}期")
 
+        # 1.5: 🧹 内存检测 + GC回收
+        import gc as _gc
+        _gc.collect()
+        try:
+            with open('/proc/meminfo', 'r') as _mf:
+                _mem_lines = _mf.readlines()
+            _mem_avail = 0
+            for _line in _mem_lines:
+                if 'MemAvailable' in _line:
+                    _mem_avail = int(_line.split()[1]) // 1024  # KB→MB
+                    break
+            self._mem_mb = _mem_avail
+            # GA参数动态缩放公式：pop ∝ 可用内存/18，gen ∝ 可用内存/36
+            # 校准点：541MB → pop=30 gen=15 (已验证可稳定运行)
+            # 最小保障15/10，最大上限200/80，避免内存无上限时失控
+            self._ga_pop = max(15, min(200, _mem_avail // 18))
+            self._ga_gen = max(10, min(80, _mem_avail // 36))
+            self._ga_elite = max(3, self._ga_pop // 8)
+
+            # 按档位输出清晰日志
+            if _mem_avail < 400:
+                _level = '受限'  # 硬下限15/10
+            elif _mem_avail < 800:
+                _level = '中等'
+            elif _mem_avail < 2000:
+                _level = '充裕'
+            elif _mem_avail < 4000:
+                _level = '充足'
+            else:
+                _level = '丰富'
+            print(f"[DLT-Fusion] 💾 内存{_level}: {_mem_avail}MB可用, GA pop={self._ga_pop} gen={self._ga_gen} elite={self._ga_elite}")
+        except Exception:
+            self._ga_pop = 30
+            self._ga_gen = 15
+            self._mem_mb = 0
+
         # 2. 初始化所有子模块
         try:
             self.predictor = DLTPredictorUpgraded(data_path)
@@ -90,6 +128,13 @@ class DLTFusionComplete:
 
         self.sfe = StrategyFusionEngine(self.draws, n_groups=5)
         self.pool_sampler = MultiPoolSampler(self.draws)
+        # 将内存感知的GA参数同步到MultiPoolSampler的genetic_optimizer
+        try:
+            self.pool_sampler.genetic_optimizer.population_size = self._ga_pop
+            self.pool_sampler.genetic_optimizer.generations = self._ga_gen
+            self.pool_sampler.genetic_optimizer.elite_size = self._ga_elite
+        except Exception:
+            pass
         self.back_fusion = BackZoneFusion(self.draws)
         self.game_theory = DLTGameTheoryAnalyzer()
         self.genetic = DLTGeneticOptimizer(self.draws)
@@ -104,27 +149,21 @@ class DLTFusionComplete:
         except Exception as e:
             print(f"[DLT-Fusion] ⚠️ 模式识别器初始化失败: {e}")
 
-        # 7. 初始化神经网络模型（TabNet + LSTM + Transformer）
+        # 7. 初始化神经网络模型（TabNet + LSTM + Transformer）— 惰性加载，首次predict时再训练
         self.neural_ensemble = None
-        try:
-            self.neural_ensemble = NeuralEnsemble(
-                self.draws, seq_len=20, window=50,
-                train_epochs=50, auto_train=True
-            )
-            if TORCH_OK and self.neural_ensemble.is_trained:
-                print(f"[DLT-Fusion] 🧠 神经网络集成器初始化完成 (TabNet+LSTM+Transformer)")
-            else:
-                print(f"[DLT-Fusion] 🧠 神经网络集成器已加载 (fallback模式)")
-        except Exception as e:
-            print(f"[DLT-Fusion] ⚠️ 神经网络初始化跳过: {e}")
+        self._neural_lazy = True
+        print(f"[DLT-Fusion] 🧠 神经网络: 惰性加载 (首次predict时训练)")
 
-        # 初始化遗传算法
+        # 初始化遗传算法 — 根据可用内存调整代数和种群
         try:
-            self.genetic.evolve(generations=5, verbose=False)
+            self.genetic.population_size = self._ga_pop
+            self.genetic.generations = self._ga_gen
+            self.genetic.evolve()
+            print(f"[DLT-Fusion] 🧬 遗传算法进化完成 (pop={self._ga_pop}, gen={self._ga_gen})")
         except Exception as e:
-            print(f"[DLT-Fusion] 遗传算法初始化: {e}")
+            print(f"[DLT-Fusion] ⚠️ 遗传算法初始化: {e}")
 
-        print(f"[DLT-Fusion] 初始化完成 | V3.0.2 + NeuralEnsemble")
+        print(f"[DLT-Fusion] 初始化完成 | V3.1.1 + NeuralEnsemble")
 
     def _load_data(self, path: str) -> List[Tuple[List[int], List[int]]]:
         """加载数据，支持多种fallback"""
@@ -357,27 +396,27 @@ class DLTFusionComplete:
         try:
             self.sfe = StrategyFusionEngine(self.draws, n_groups=5)
             self.pool_sampler = MultiPoolSampler(self.draws)
+            # 同步GA参数到pool_sampler
+            self.pool_sampler.genetic_optimizer.population_size = self._ga_pop
+            self.pool_sampler.genetic_optimizer.generations = self._ga_gen
+            self.pool_sampler.genetic_optimizer.elite_size = self._ga_elite
             self.back_fusion = BackZoneFusion(self.draws)
             self.genetic = DLTGeneticOptimizer(self.draws)
             self.stats = DLTStatisticsAnalyzer(self.draws)
             self.pattern_recognizer = DLTPatternRecognizer(self.draws)
             self.pattern_recognizer.build_distributions(window=500)
-            self.genetic.evolve(generations=5, verbose=False)
+            self.genetic.population_size = self._ga_pop
+            self.genetic.generations = self._ga_gen
+            self.genetic.evolve()
             # 约束引擎重新初始化
             try:
                 self.constraint_engine = DLTConstraintEngine()
             except Exception:
                 pass
-            # 神经网络重新训练
-            try:
-                self.neural_ensemble = NeuralEnsemble(
-                    self.draws, seq_len=20, window=50,
-                    train_epochs=30, auto_train=True
-                )
-                if TORCH_OK and self.neural_ensemble.is_trained:
-                    print(f"[DLT-Fusion] 🔄 神经网络模型已重新训练")
-            except Exception as e:
-                print(f"[DLT-Fusion] ⚠️ 神经网络重训练跳过: {e}")
+            # 神经网络标记为惰性等待（首次predict时再训练）
+            self.neural_ensemble = None
+            self._neural_lazy = True
+            print(f"[DLT-Fusion] 🔄 神经网络: 标记惰性等待 (predict时训练)")
 
             print(f"[DLT-Fusion] 🔄 子模块已基于新数据重新初始化 ({len(self.draws)}期)")
         except Exception as e:
@@ -438,6 +477,22 @@ class DLTFusionComplete:
                 from itertools import combinations
                 pool_front_candidates = list(combinations(front_pool[:fc * 2], fc))
                 pool_back_candidates = list(combinations(back_pool[:bc * 2], bc))
+
+                # 【优化】枚举剪枝：对大型复式(>10000组合)，先用预评分过滤掉低分组合
+                max_enum = 10000
+                total_combos = len(pool_front_candidates) * len(pool_back_candidates)
+                if total_combos > max_enum:
+                    # 对前区候选预评分，保留top 60%
+                    front_scores = {}
+                    for f_pool in pool_front_candidates:
+                        avg = 0.0
+                        for n in f_pool:
+                            avg += sum(1 for d in self.draws[-30:] if n in d[0])
+                        front_scores[f_pool] = avg / fc
+                    scored_front = sorted(front_scores.items(), key=lambda x: -x[1])
+                    keep = max(len(scored_front) // 2, 5)
+                    pool_front_candidates = [fp for fp, _ in scored_front[:keep]]
+                    print(f"[DLT-Fusion] 📐 复式{label}枚举剪枝: {total_combos}→{keep*len(pool_back_candidates)}")
 
                 # 对每种候选池组合评分
                 scored_pools = []
@@ -603,6 +658,17 @@ class DLTFusionComplete:
                         uni_set.add(n)
                         break
 
+        # 【V3.1.1】强制确保5-8段至少2个号码（26065期后区8号完全漏掉）
+        seg2_count = len(uni_set & SEG2)
+        if seg2_count < 2:
+            extra_nums = sorted(SEG2 - uni_set)
+            for n in extra_nums:
+                if n not in uni_set:
+                    unique.append(n)
+                    uni_set.add(n)
+                    if len(uni_set & SEG2) >= 2:
+                        break
+
         return unique[:target_size]
 
     def _inject_compound_scores(self, combos):
@@ -683,34 +749,40 @@ class DLTFusionComplete:
                 even_cnt = 5 - odd_cnt
 
                 match = 0.0
+                # 从 _pattern_distributions (正确属性名) 读取各模式分布
+                pdists = pr._pattern_distributions
+
                 # 和值模式
-                s_dist = pr.pattern_stats.get('sum', {}).get('distribution', {})
-                if s_dist:
-                    bucket = (front_sum // 5) * 5
-                    freq = s_dist.get(bucket, 0)
-                    total = sum(s_dist.values()) or 1
-                    match += freq / total * 0.05
+                s_dist_obj = pdists.get('sum', {})
+                s_counter = s_dist_obj.get('counter', Counter())
+                s_total = s_dist_obj.get('total', 1) or 1
+                bucket = (front_sum // 5) * 5
+                freq = s_counter.get(bucket, 0)
+                match += freq / s_total * 0.05
+
                 # 跨度模式
-                sp_dist = pr.pattern_stats.get('span', {}).get('distribution', {})
-                if sp_dist:
-                    bucket = (span // 5) * 5
-                    freq = sp_dist.get(bucket, 0)
-                    total = sum(sp_dist.values()) or 1
-                    match += freq / total * 0.05
+                sp_dist_obj = pdists.get('span', {})
+                sp_counter = sp_dist_obj.get('counter', Counter())
+                sp_total = sp_dist_obj.get('total', 1) or 1
+                bucket_sp = (span // 5) * 5
+                freq_sp = sp_counter.get(bucket_sp, 0)
+                match += freq_sp / sp_total * 0.05
+
                 # 奇偶模式
-                oe_dist = pr.pattern_stats.get('odd_even_ratio', {}).get('distribution', {})
-                if oe_dist:
-                    key = f"{odd_cnt}:{even_cnt}"
-                    freq = oe_dist.get(key, 0)
-                    total = sum(oe_dist.values()) or 1
-                    match += freq / total * 0.05
+                oe_dist_obj = pdists.get('odd_even', {})
+                oe_counter = oe_dist_obj.get('counter', Counter())
+                oe_total = oe_dist_obj.get('total', 1) or 1
+                key = (odd_cnt, even_cnt)
+                freq_oe = oe_counter.get(key, 0)
+                match += freq_oe / oe_total * 0.05
+
                 # AC值模式
-                ac_dist = pr.pattern_stats.get('ac_value', {}).get('distribution', {})
-                if ac_dist:
-                    ac_val = len(set(abs(front[i] - front[j]) for i in range(5) for j in range(i + 1, 5))) - 4
-                    freq = ac_dist.get(ac_val, 0)
-                    total = sum(ac_dist.values()) or 1
-                    match += freq / total * 0.05
+                ac_dist_obj = pdists.get('ac_value', {})
+                ac_counter = ac_dist_obj.get('counter', Counter())
+                ac_total = ac_dist_obj.get('total', 1) or 1
+                ac_val = len(set(abs(front[i] - front[j]) for i in range(5) for j in range(i + 1, 5))) - 4
+                freq_ac = ac_counter.get(ac_val, 0)
+                match += freq_ac / ac_total * 0.05
 
                 score += match * 0.20
         except Exception:
@@ -815,16 +887,18 @@ class DLTFusionComplete:
             from modules.dlt_compound_betting import select_diverse as _sd
             diverse = _sd(selected_tuples, n_sets)
 
-            # 多样性方案：每次选不同的子组合，但展示完整拖池
-            # （前区拖池固定，多样性的价值在后区配对）
+            # 多样性方案：对每个组合计算实际选中的拖码子集，而非始终显示完整拖池
             for ff, fb in diverse:
                 probs = self._calc_probability(list(ff), list(fb))
-                # 计算后区完整候选池（含胆码）
+                # 从完整组合中提取实际选中的拖码（全组合 - 胆码）
+                selected_tuo = sorted(set(ff) - set(dan_f))
+                # 后区完整候选池（含胆码）
                 back_pool_full = sorted(dan_b + tuo_b) if dan_b else sorted(tuo_b)
                 results.append({
                     'name': f"{nd}胆{nt}拖",
                     'front_dan': dan_f,
-                    'front_tuo_pool': tuo_f,              # 完整拖池（如8个号）
+                    'front_tuo': selected_tuo,            # 具体选中的拖码子集
+                    'front_tuo_pool': tuo_f,              # 完整拖池（供参考）
                     'back': list(fb),                     # 推荐的1组后区（多样性）
                     'back_pool_full': back_pool_full,     # 后区完整候选池
                     'total_bets': total_bets,
@@ -912,20 +986,42 @@ class DLTFusionComplete:
         if not synced:
             print(sync_msg)
 
-        # Step 0: 触发预测时同步最新开奖数据
+        # Step 0: 触发预测时同步最新开奖数据（带缓存，1分钟内不重复检查）
         try:
-            from dlt_data_updater import check_and_update
-            update_result = check_and_update()
-            if update_result['updated']:
-                print(f"[DLT-Fusion] 📥 已同步新数据: +{update_result['new_count']}期 "
-                      f"({update_result['new_periods'][0]}~{update_result['new_periods'][-1]})")
-                # 数据有更新，重新加载子模块
-                self.draws = self._load_data(self.data_path)
-                self._reinit_submodules()
+            now = _time.time()
+            # 缓存：30秒内不重复 check
+            if not hasattr(self, '_last_check_time') or now - self._last_check_time > 30:
+                self._last_check_time = now
+                update_result = check_and_update()
+                if update_result['updated']:
+                    print(f"[DLT-Fusion] 📥 已同步新数据: +{update_result['new_count']}期 "
+                          f"({update_result['new_periods'][0]}~{update_result['new_periods'][-1]})")
+                    # 数据有更新，重新加载子模块
+                    self.draws = self._load_data(self.data_path)
+                    self._reinit_submodules()
+                else:
+                    print(f"[DLT-Fusion] ✅ 数据已是最新 (最新期号: {update_result['last_period']})")
             else:
-                print(f"[DLT-Fusion] ✅ 数据已是最新 (最新期号: {update_result['last_period']})")
+                elapsed = now - self._last_check_time
+                print(f"[DLT-Fusion] ⏭️ 数据同步跳过 ({elapsed:.0f}s内已检查)")
         except Exception as e:
             print(f"[DLT-Fusion] ⚠️ 数据更新检查跳过: {e}")
+
+        # Step 0.3: 💤 惰性初始化神经网络（首次predict时训练）
+        try:
+            if self._neural_lazy and TORCH_OK:
+                self.neural_ensemble = NeuralEnsemble(
+                    self.draws, seq_len=20, window=50,
+                    train_epochs=50, auto_train=True
+                )
+                if self.neural_ensemble.is_trained:
+                    print(f"[DLT-Fusion] 🧠 神经网络集成器训练完成 (TabNet+LSTM+Transformer)")
+                else:
+                    print(f"[DLT-Fusion] 🧠 神经网络集成器加载完成 (fallback)")
+                self._neural_lazy = False
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 神经网络惰性初始化跳过: {e}")
+            self._neural_lazy = False
 
         # Step 0.5: 区间漂移检测 — 当检测到漂移时，候选中将追加区间漂移补偿候选
         drift_info = self._detect_zone_drift()
@@ -990,7 +1086,29 @@ class DLTFusionComplete:
                 prev_front=prev_front, boost_weight=0.35
             )
 
-        # Step 7b2: 区间漂移补偿 — 调整候选评分，偏向漂移方向
+        # Step 7b2: 和值动量衰减补偿 — 当和值连续3期下降时强力补偿小号区
+        if len(self.draws) >= 5:
+            recent_sums = [sum(self.draws[-i-1][0]) for i in range(min(5, len(self.draws)))]
+            # 检测连续下降
+            consecutive_down = 0
+            for i in range(1, len(recent_sums)):
+                if recent_sums[i] < recent_sums[i-1]:
+                    consecutive_down += 1
+                else:
+                    break
+            if consecutive_down >= 3:
+                print(f"[DLT-Fusion] 📉 和值动量衰减: 连续{consecutive_down}期下降 "
+                      f"({recent_sums[::-1]}), 补偿小号区候选")
+                for c in all_candidates:
+                    front = c.get('front', [])
+                    if sum(front) <= 75:
+                        c['final_score'] = c.get('final_score', 0.5) * 1.08
+                    elif sum(front) <= 85:
+                        c['final_score'] = c.get('final_score', 0.5) * 1.04
+                    elif sum(front) >= 110:
+                        c['final_score'] = c.get('final_score', 0.5) * 0.95
+
+        # Step 7b3: 区间漂移补偿 — 调整候选评分，偏向漂移方向
         # 【优化V3.0.2】降低漂移检测启动阈值 0.15→0.10
         if drift_info['drift_detected'] and drift_info['confidence'] >= 0.10:
             all_candidates = self._apply_drift_boost(all_candidates, drift_info)
@@ -1010,23 +1128,48 @@ class DLTFusionComplete:
         all_candidates = self._apply_tail_density_scoring(all_candidates)
         all_candidates = self._apply_ac_value_scoring(all_candidates)
 
-        # Step 7c2.5: 🧠 神经网络评分（TabNet + LSTM + Transformer）
-        try:
-            if self.neural_ensemble is not None and self.neural_ensemble.is_trained:
-                self.neural_ensemble.score_batch(all_candidates, self.draws)
-                # 对已有neural_score的候选做混合
-                for c in all_candidates:
-                    ns = c.get('neural_score', 0.5)
-                    c['final_score'] = c['final_score'] * 0.75 + ns * 0.25
-                print(f"[DLT-Fusion] 🧠 神经网络评分已集成 (+25%权重)")
-        except Exception as e:
-            print(f"[DLT-Fusion] ⚠️ 神经网络评分跳过: {e}")
-
-        # Step 7c2.6: 🎯 号码过度集中抑制（P1）— 防止候选集被少数热号垄断
+        # Step 7c2.5: 🎯 号码过度集中抑制（P1）— 防止候选集被少数热号垄断
         try:
             all_candidates = self._apply_diversity_penalty(all_candidates)
         except Exception as e:
             print(f"[DLT-Fusion] ⚠️ 多样性惩罚跳过: {e}")
+
+        # Step 7c2.6: 🔥 热号衰减瓶颈 — 连续出现≥3期的号码权重自动×0.7（必须在神经前执行）
+        try:
+            if len(self.draws) >= 5:
+                from collections import Counter as _C
+                recent_5_nums = _C()
+                for i in range(5):
+                    recent_5_nums.update(self.draws[-i-1][0])
+                hot_bottleneck_nums = {n for n, c in recent_5_nums.items() if c >= 3}
+                if hot_bottleneck_nums:
+                    for c in all_candidates:
+                        front = set(c.get('front', []))
+                        overlap = len(front & hot_bottleneck_nums)
+                        if overlap >= 2:
+                            orig = c.get('final_score', 0.5)
+                            decay = 1.0 - (overlap * 0.08)
+                            c['final_score'] = max(orig * max(decay, 0.7), 0.5)
+                    print(f"[DLT-Fusion] 🔥 热号衰减瓶颈: {hot_bottleneck_nums} 衰减{len(all_candidates)}注")
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 热号衰减跳过: {e}")
+
+        # 【优化】最终评分下限保护：确保所有候选 final_score ≥ 0.50，防止多重衰减压到无效
+        for c in all_candidates:
+            c['final_score'] = max(c.get('final_score', 0.5), 0.50)
+
+        # Step 7c2.7: 🧠 神经网络评分（TabNet + LSTM + Transformer）— 最后做，避免被后续覆盖
+        try:
+            if self.neural_ensemble is not None and self.neural_ensemble.is_trained:
+                self.neural_ensemble.score_batch(all_candidates, self.draws)
+                for c in all_candidates:
+                    ns = c.get('neural_score', None)
+                    if ns is not None:
+                        c['neural_score'] = ns
+                        c['final_score'] = c['final_score'] * 0.75 + ns * 0.25
+                print(f"[DLT-Fusion] 🧠 神经网络评分已集成 (+25%权重)")
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 神经网络评分跳过: {e}")
 
         # Step 7c3: 偏差仪表盘 + 置信度重校准
         dashboard = self._compute_deviation_dashboard(all_candidates)
@@ -1088,17 +1231,33 @@ class DLTFusionComplete:
             bet['front'] = sorted(set(bet['front']))
             # 后区去重排序
             bet['back'] = sorted(set(bet['back']))
-            # 补足到5个前区号码（万一set去重后少了）
-            while len(bet['front']) < 5:
-                fill = random.randint(1, 35)
-                if fill not in bet['front']:
-                    bet['front'].append(fill)
+            # 补足到5个前区号码（从候选集中按频率加权填充，非纯随机）
+            if len(bet['front']) < 5:
+                # 统计所有候选中出现频率最高的号码
+                from collections import Counter as _FillC
+                all_front_nums = _FillC()
+                for c in unique:
+                    for n in c.get('front', []):
+                        all_front_nums[n] += 1
+                candidates_ranked = [n for n, _ in all_front_nums.most_common()]
+                for fill in candidates_ranked:
+                    if len(set(bet['front'])) >= 5:
+                        break
+                    if fill not in bet['front']:
+                        bet['front'].append(fill)
             bet['front'].sort()
-            # 补足到2个后区号码
-            while len(bet['back']) < 2:
-                fill = random.randint(1, 12)
-                if fill not in bet['back']:
-                    bet['back'].append(fill)
+            # 补足到2个后区号码（从后区推荐中填充，非纯随机）
+            if len(bet['back']) < 2:
+                fill_pool = []
+                for br in back_recs:
+                    fill_pool.extend(br)
+                if not fill_pool:
+                    fill_pool = list(range(1, 13))
+                for fill in fill_pool:
+                    if len(set(bet['back'])) >= 2:
+                        break
+                    if fill not in bet['back']:
+                        bet['back'].append(fill)
             bet['back'].sort()
 
         # Step 10: 最终排名并计算命中概率
@@ -1428,20 +1587,20 @@ class DLTFusionComplete:
         return candidates
 
     def _sample_pool_candidates(self, n_per_pool: int = 2) -> List[Dict[str, Any]]:
-        """多池采样候选"""
+        """多池采样候选 — [修复] 后区使用back_fusion推荐而非random"""
         candidates = []
         try:
-            # 使用stratified_sample生成前区组合
             front_combos = self.pool_sampler.stratified_sample(
                 n_combinations=n_per_pool * 3, zone='front'
             )
-            back_combos = self.pool_sampler.stratified_sample(
-                n_combinations=n_per_pool * 3, zone='back'
-            )
+            # 使用 back_fusion 推荐后区，而非纯随机
+            back_recs_local = self.get_back_recommendations()
+            if not back_recs_local:
+                back_recs_local = [[1, 6], [5, 11], [3, 8], [4, 10], [2, 12]]
 
             # 交叉组合前区与后区
-            for fc in front_combos[:n_per_pool * 2]:
-                bc = random.choice(back_combos) if back_combos else [5, 8]
+            for i, fc in enumerate(front_combos[:n_per_pool * 2]):
+                bc = back_recs_local[i % len(back_recs_local)]
                 candidates.append({
                     'front': sorted(fc),
                     'back': sorted(bc),
@@ -2044,9 +2203,10 @@ class DLTFusionComplete:
 
     def _recalibrate_score_weights(self, candidates: List[Dict[str, Any]]) -> None:
         """
-        【优化 3.0.3-②】滑动窗口权重校准
-        在最近20期回测中搜索最优 base/gt/genetic 权重组合，
-        使 Top5 平均前区命中数最大化。
+        【优化 3.0.3-②】滑动窗口权重校准（全量 980 次）
+        在最近20期回测中搜索最优 base/gt/genetic 权重组合。
+        V3.1.1 恢复全量计算：使用内存感知的 GA 参数（_ga_pop/_ga_gen）。
+        【性能优化】只创建20个sampler(每期1个)，49权重组合复用采样结果。
         """
         window = min(20, len(self.draws))
         if window < 10:
@@ -2062,12 +2222,42 @@ class DLTFusionComplete:
 
             from five_pool_sampler_complete_final import MultiPoolSampler
 
-            # 候选权重组合（步长0.05，和为1.0）
             best_weight = None
             best_hits = -1.0
 
-            for w_base in [x / 100.0 for x in range(20, 55, 5)]:
-                for w_gt in [x / 100.0 for x in range(20, 55, 5)]:
+            # 【优化】先为每期预生成候选，避免980次重复采样
+            # 外层：20期 × 1次采样 = 20个sampler
+            period_candidates = []
+            for i, actual in enumerate(test_draws):
+                hist = self.draws[:train_end + i] if i < window else self.draws
+                sampler = MultiPoolSampler(hist)
+                sampler.genetic_optimizer.population_size = self._ga_pop
+                sampler.genetic_optimizer.generations = self._ga_gen
+                sampler.genetic_optimizer.elite_size = self._ga_elite
+
+                sim_cands = []
+                try:
+                    front_combos = sampler.stratified_sample(n_combinations=6, zone='front')
+                    for fc in front_combos:
+                        base_s = 0.5 + sum(1 for n in fc if n >= 18) / 50.0
+                        sim_cands.append({
+                            'front': list(fc),
+                            'base_score': min(1.0, base_s),
+                            'gt_score': 0.5,
+                            'genetic_score': 0.5,
+                        })
+                except Exception:
+                    sim_cands = []
+                period_candidates.append({
+                    'actual_front': set(actual[0]),
+                    'cands': sim_cands,
+                })
+
+            # 内层：49权重组合，仅做数学运算，不复用采样/GA
+            for w_base_int in range(20, 55, 5):
+                w_base = w_base_int / 100.0
+                for w_gt_int in range(20, 55, 5):
+                    w_gt = w_gt_int / 100.0
                     w_genetic = 1.0 - w_base - w_gt
                     if w_genetic < 0.2 or w_genetic > 0.5:
                         continue
@@ -2075,38 +2265,17 @@ class DLTFusionComplete:
                     total_hits = 0.0
                     count = 0
 
-                    for i, actual in enumerate(test_draws):
-                        hist = self.draws[:train_end + i] if i < window else self.draws
-                        actual_front = set(actual[0])
-
-                        # 用历史数据模拟生成候选
-                        sampler = MultiPoolSampler(hist)
-                        sim_cands = []
-                        try:
-                            front_combos = sampler.stratified_sample(n_combinations=6, zone='front')
-                            for fc in front_combos:
-                                base_s = 0.5 + sum(1 for n in fc if n >= 18) / 50.0
-                                gt_s = 0.5
-                                gen_s = 0.5
-                                sim_cands.append({
-                                    'front': list(fc),
-                                    'base_score': min(1.0, base_s),
-                                    'gt_score': gt_s,
-                                    'genetic_score': gen_s,
-                                })
-                        except Exception:
-                            continue
-
+                    for pc in period_candidates:
+                        actual_front = pc['actual_front']
+                        sim_cands = pc['cands']
                         if not sim_cands:
                             continue
 
-                        # 用当前权重打分并取Top5
                         for c in sim_cands:
                             c['score'] = c['base_score'] * w_base + c['gt_score'] * w_gt + c['genetic_score'] * w_genetic
                         sim_cands.sort(key=lambda x: -x['score'])
                         top5 = sim_cands[:5]
 
-                        # 计算Top5前区命中数
                         for c in top5:
                             total_hits += len(set(c['front']) & actual_front)
                         count += len(top5)
@@ -2123,8 +2292,9 @@ class DLTFusionComplete:
                     'gt': best_weight[1],
                     'genetic': best_weight[2],
                 }
-                print(f"[DLT-Fusion] 🎯 权重校准: base={best_weight[0]:.2f} gt={best_weight[1]:.2f} "
-                      f"genetic={best_weight[2]:.2f} (平均命中={best_hits:.4f}/注)")
+                print(f"[DLT-Fusion] 🎯 权重校准(全量): base={best_weight[0]:.2f} gt={best_weight[1]:.2f} "
+                      f"genetic={best_weight[2]:.2f} (平均命中={best_hits:.4f}/注, "
+                      f"{len(list(range(20,55,5)))**2}权重×{window}期=980次, 采样20次)")
             else:
                 self.score_weights = {'base': 0.4, 'gt': 0.3, 'genetic': 0.3}
         except Exception as e:
@@ -2213,67 +2383,52 @@ class DLTFusionComplete:
         self, candidates: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        隔期重号评分增强：候选与draws[-2](上上期)号码匹配时加分。
+        隔期重号评分增强（V3.1.1 弱化版）：候选与draws[-2](上上期)号码匹配时加分。
 
-        历史统计：隔期前区重号≥2个的概率约14.6%，且经常伴随后区隔期回归。
-
-        # 【优化V3.0.2】提高隔期重号加分倍率，因为26063实际重号29和31说明隔期重复是有效信号
-        增强策略：
-        - 前区与上上期匹配≥2个：最终评分×1.20
-        - 后区与上上期匹配≥1个：最终评分×1.15
-        - 前后区同时匹配（前≥2且后≥1）：最终评分×1.28
-        - 前区匹配≥3个：最终评分×1.18
+        V3.1.1 变更：移除隔期重号增强的激进加成，重号处理已由模式识别的重号特征(权重15%)
+        和智能重号惩罚共同覆盖，隔期增强只保留极轻度兜底加成，避免过度押注连续重号。
+        仅当号码连续出现≥4期时才启动中等增强。
 
         Returns:
             评分调整后的候选列表
         """
-        if len(self.draws) < 3:
+        if len(self.draws) < 4:
             return candidates
 
-        skip_front = set(self.draws[-2][0])  # 上上期前区
-        skip_back = set(self.draws[-2][1])   # 上上期后区
+        skip_front = set(self.draws[-2][0])
         boost_count = 0
-        strong_boost_count = 0
 
         for c in candidates:
             c_front = set(c.get('front', []))
-            c_back = set(c.get('back', []))
-
             front_skip_overlap = len(c_front & skip_front)
-            back_skip_overlap = len(c_back & skip_back)
+            if front_skip_overlap < 2:
+                continue
 
             orig = c.get('final_score', c.get('base_score', 1.0))
             multiplier = 1.0
-            reasons = []
 
-            if front_skip_overlap >= 2 and back_skip_overlap >= 1:
-                # 前后区同时隔期匹配：强增强
-                multiplier = 1.28
-                reasons.append(f'前后隔期双匹配(前{front_skip_overlap}+后{back_skip_overlap})')
-                strong_boost_count += 1
-            elif front_skip_overlap >= 3:
-                # 前区高度匹配上上期：中等增强
-                multiplier = 1.18
-                reasons.append(f'前区隔期高匹配({front_skip_overlap}个)')
-            elif front_skip_overlap >= 2:
-                # 前区匹配≥2：基础增强
-                multiplier = 1.20
-                reasons.append(f'前区隔期匹配({front_skip_overlap}个)')
-            elif back_skip_overlap >= 1:
-                # 后区单独匹配≥1：轻度增强
-                multiplier = 1.15
-                reasons.append(f'后区隔期匹配({back_skip_overlap}个)')
+            # 增强检查：该号码是否连续≥4期出现
+            consecutive_appearances = {}
+            for n in (c_front & skip_front):
+                count = 0
+                for i in range(min(6, len(self.draws))):
+                    if n in self.draws[-i-1][0]:
+                        count += 1
+                    else:
+                        break
+                consecutive_appearances[n] = count
+
+            max_consecutive = max(consecutive_appearances.values()) if consecutive_appearances else 0
+
+            if max_consecutive >= 4:
+                multiplier = 1.10
+                boost_count += 1
 
             if multiplier > 1.0:
                 c['final_score'] = orig * multiplier
-                boost_count += 1
-                if boost_count <= 5:
-                    print(f"[DLT-Fusion] 🚀 隔期重号增强: 前区{c.get('front', [])} "
-                          f"({', '.join(reasons)}, score: {orig:.4f}→{c['final_score']:.4f}, ×{multiplier:.2f})")
 
         if boost_count > 0:
-            print(f"[DLT-Fusion] 🚀 隔期重号增强合计: {boost_count}注受加成 "
-                  f"(强增强{strong_boost_count}注)")
+            print(f"[DLT-Fusion] 🚀 隔期重号增强(弱化): {boost_count}注受加成 (阈值≥4期连续)")
 
         return candidates
 
@@ -3167,31 +3322,37 @@ class DLTFusionComplete:
         计算候选号码的命中概率（经验加权评分）。
         输出百分比形式，不是真实概率（彩票号码不可预测）。
         用于候选之间的相对排序参考。
+
+        【优化】各子项归一化到 [0,1] 区间后再加权，避免量级差异扭曲权重。
         """
         front_arr = np.array(front)
         back_arr = np.array(back)
         n = len(self.draws)
         recent_n = min(20, n)
+        recent_draws = self.draws[-recent_n:] if len(self.draws) >= recent_n else self.draws
 
-        # 前区频率得分
-        front_freq_prob = np.mean([
+        # ---- 前区评分（各子项均归一化到0-1） ----
+
+        # 频率得分：基准值0.714(随机期望5/35*5)，高于此得高分
+        front_freq_avg = np.mean([
             sum(1 for f_, _ in self.draws if num in f_) / max(n, 1)
             for num in front_arr
         ])
+        front_freq_norm = min(front_freq_avg / 0.714, 1.0)  # 归一化到随机基准
 
-        # 近期趋势得分（近20期）
-        recent_draws = self.draws[-recent_n:] if len(self.draws) >= recent_n else self.draws
-        front_recent_prob = np.mean([
+        # 近期趋势
+        front_recent_avg = np.mean([
             sum(1 for f_, _ in recent_draws if num in f_) / max(len(recent_draws), 1)
             for num in front_arr
         ])
+        front_recent_norm = min(front_recent_avg / 0.714, 1.0)
 
-        # 遗漏得分
-        front_missing = []
-        for num in front_arr:
-            miss = n - sum(1 for f_, _ in self.draws if num in f_)
-            front_missing.append(miss)
-        front_missing_prob = min(np.mean(front_missing) / 100, 1.0)
+        # 遗漏评分：遗漏天数越大越好（冷号反弹潜力），归一化到[0,0.3]期望范围
+        front_missing_avg = np.mean([
+            n - sum(1 for f_, _ in self.draws if num in f_)
+            for num in front_arr
+        ])
+        front_missing_norm = min(front_missing_avg / 30.0, 1.0)
 
         # 和值评分
         front_sum = np.sum(front_arr)
@@ -3205,29 +3366,39 @@ class DLTFusionComplete:
         span = max(front_arr) - min(front_arr)
         span_score = 1.0 if 15 <= span <= 32 else max(0, 1 - abs(span - 24) / 20)
 
-        # 后区
-        back_freq_prob = np.mean([
+        # 前区综合（所有子项均为0-1，加权计算）
+        front_prob = (front_freq_norm * 0.15 + front_recent_norm * 0.25 +
+                      front_missing_norm * 0.15 + sum_score * 0.20 +
+                      odd_score * 0.10 + span_score * 0.15)
+
+        # ---- 后区评分 ----
+        back_freq_avg = np.mean([
             sum(1 for _, b_ in self.draws if num in b_) / max(n, 1)
             for num in back_arr
         ])
-        back_recent_prob = np.mean([
+        back_freq_norm = min(back_freq_avg / 0.333, 1.0)  # 随机基准 2/12*2 ≈ 0.333
+
+        back_recent_avg = np.mean([
             sum(1 for _, b_ in recent_draws if num in b_) / max(len(recent_draws), 1)
             for num in back_arr
         ])
-        back_missing = []
-        for num in back_arr:
-            miss = n - sum(1 for _, b_ in self.draws if num in b_)
-            back_missing.append(miss)
-        back_missing_prob = min(np.mean(back_missing) / 100, 1.0)
+        back_recent_norm = min(back_recent_avg / 0.333, 1.0)
+
+        back_missing_avg = np.mean([
+            n - sum(1 for _, b_ in self.draws if num in b_)
+            for num in back_arr
+        ])
+        back_missing_norm = min(back_missing_avg / 20.0, 1.0)
+
         back_sum = np.sum(back_arr)
         back_sum_score = 1.0 if 3 <= back_sum <= 23 else max(0, 1 - abs(back_sum - 13) / 12)
 
-        front_prob = (front_freq_prob * 0.15 + front_recent_prob * 0.25 +
-                      front_missing_prob * 0.15 + sum_score * 0.20 +
-                      odd_score * 0.10 + span_score * 0.15)
-        back_prob = (back_freq_prob * 0.15 + back_recent_prob * 0.25 +
-                     back_missing_prob * 0.20 + back_sum_score * 0.25 +
-                     (1.0 if back_arr[0] != back_arr[1] else 0.5) * 0.15)
+        back_unique_score = 1.0 if back_arr[0] != back_arr[1] else 0.3
+
+        back_prob = (back_freq_norm * 0.15 + back_recent_norm * 0.25 +
+                     back_missing_norm * 0.20 + back_sum_score * 0.25 +
+                     back_unique_score * 0.15)
+
         combined_prob = front_prob * 0.70 + back_prob * 0.30
 
         return {

@@ -74,14 +74,18 @@ def _print_predict(result: Dict[str, Any]) -> None:
             print(f"  {label}:")
             for s in schemes:
                 dan = _fmt_front(s.get('front_dan', []))
-                # 优先使用完整拖池，兼容旧格式
-                tuo = _fmt_front(s.get('front_tuo_pool', s.get('front_tuo', [])))
+                # 完整拖池（注数基于此计算）
+                tuo_pool = _fmt_front(s.get('front_tuo_pool', []))
+                # 具体推荐拖码子集
+                tuo_rec = _fmt_front(s.get('front_tuo', []))
                 back = _fmt_back(s.get('back', []))
                 bets = s.get('total_bets', 0)
                 prob = s.get('hit_probability', 0)
                 name = s.get('name', '')
-                print(f"    {name}: 胆[{dan}] 拖[{tuo}] 后区[{back}]  "
+                print(f"    {name}: 胆[{dan}] 拖池[{tuo_pool}] 后区[{back}]  "
                       f"{bets}注{bets*2}元  p={prob:.1f}%")
+                if tuo_rec and tuo_rec != tuo_pool:
+                    print(f"           推荐: 拖[{tuo_rec}]")
 
     print(f"\n⚠️  仅供参考娱乐，请理性投注！")
 

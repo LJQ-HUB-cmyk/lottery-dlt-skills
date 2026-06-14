@@ -33,13 +33,13 @@ class MultiPoolSampler:
         # 初始化博弈论分析器
         self.game_theory_analyzer = DLTGameTheoryAnalyzer()
         
-        # 初始化遗传算法优化器
+        # 初始化遗传算法优化器（默认参数，DLTFusionComplete可运行时覆盖）
         self.genetic_optimizer = DLTGeneticOptimizer(
-            population_size=100,
-            generations=50,
+            population_size=30,
+            generations=15,
             crossover_rate=0.8,
             mutation_rate=0.2,
-            elite_size=10
+            elite_size=5
         )
         
         # 热冷评分缓存
@@ -336,6 +336,20 @@ class MultiPoolSampler:
             direction = 'stable'
             strength = 0.3
 
+        # 【V3.1.1】和值动量衰减增强：连续下降≥3期时大幅提升小号区权重
+        if direction == 'down' and len(sums) >= 8:
+            # 细化检测：最近5期和值是否连续走低
+            recent_sums = sums[-5:]
+            consecutive_down = 0
+            for i in range(1, len(recent_sums)):
+                if recent_sums[i] < recent_sums[i-1]:
+                    consecutive_down += 1
+                else:
+                    break
+            if consecutive_down >= 3:
+                strength *= 1.5
+                print(f"📈 趋势池动量衰减: 连续{consecutive_down}期下降, 强度放大×1.5")
+
         # 基于趋势方向给每个号码打分
         scores = {}
         for num in range(1, 36):
@@ -354,6 +368,8 @@ class MultiPoolSampler:
                 # 小号区加分，大号区减分
                 if num <= 9:
                     bonus = strength * 0.8
+                elif num <= 12:
+                    bonus = strength * 0.6  # V3.1.1: 扩大小号范围到1-12
                 elif num <= 19:
                     bonus = strength * 0.4
                 elif num >= 28:
