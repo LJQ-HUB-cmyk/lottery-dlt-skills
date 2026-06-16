@@ -23,8 +23,8 @@ from dlt_data_updater import check_and_update
 # ============================================================
 # 版本与参考文件同步
 # ============================================================
-VERSION = "3.1.1"
-RELEASE_DATE = "2026-06-14"
+VERSION = "3.1.2"
+RELEASE_DATE = "2026-06-16"
 
 
 def check_reference_sync():
@@ -1079,12 +1079,18 @@ class DLTFusionComplete:
         self._compute_final_scores(all_candidates)
 
         # Step 7b: 跨期模式评分增强（方案二：叠加模式匹配度评分）
+        # 【V3.1.2】boost_weight从0.35降至0.20，缓解模式池双倍偏差
         if hasattr(self, 'pattern_recognizer') and self.pattern_recognizer._is_built:
             prev_front = self.draws[-1][0] if len(self.draws) >= 1 else None
             all_candidates = apply_pattern_boost(
                 all_candidates, self.pattern_recognizer,
-                prev_front=prev_front, boost_weight=0.35
+                prev_front=prev_front, boost_weight=0.20
             )
+        # 【V3.1.2】模式池评分校准：对pattern boost引起的过度加分做衰减
+        try:
+            all_candidates = self._apply_pattern_pool_dampening(all_candidates)
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 模式池衰减跳过: {e}")
 
         # Step 7b2: 和值动量衰减补偿 — 当和值连续3期下降时强力补偿小号区
         if len(self.draws) >= 5:
@@ -1626,11 +1632,12 @@ class DLTFusionComplete:
             for i in range(3):
                 selected_front = sorted(random.sample(front_pool, 5))
                 selected_back = sorted(random.sample(back_pool, 2))
-                candidates.append({
+                # 【V3.1.2】模式池评分校准：硬编码0.6→0.52，降低默认偏高
+            candidates.append({
                     'front': selected_front,
                     'back': selected_back,
                     'source': 'pattern_pool',
-                    'total_score': 0.6,
+                    'total_score': 0.52,
                     'strategy_name': '模式池-PatternPool',
                 })
             # 也生成基于模式多样性的候选
@@ -1640,11 +1647,12 @@ class DLTFusionComplete:
             for i in range(2):
                 selected_front = sorted(random.sample(front_div, 5))
                 selected_back = sorted(random.sample(back_div, 2))
-                candidates.append({
+                # 【V3.1.2】模式池评分校准：0.55→0.50，与基准同水平
+            candidates.append({
                     'front': selected_front,
                     'back': selected_back,
                     'source': 'pattern_diversity',
-                    'total_score': 0.55,
+                    'total_score': 0.50,
                     'strategy_name': '模式池-Diversity',
                 })
         except Exception as e:
@@ -3058,6 +3066,44 @@ class DLTFusionComplete:
     # ------------------------------------------------------------------
     # 【P1】🎯 号码过度集中抑制 (Diversity Penalty)
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 【V3.1.2】模式池评分校准：对pattern boost引起的过度加分做衰减
+    # 当 pattern_score 相比 original_final_score 提升超过15%时，
+    # 将增量压缩到50%，避免模式池候选因双倍偏差获得不合理优势。
+    # ------------------------------------------------------------------
+
+    def _apply_pattern_pool_dampening(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        模式池评分校准（V3.1.2）：衰减过度加分。
+
+        检测条件：
+        - 候选有 original_final_score 和 pattern_score
+        - final_score > original_final_score * 1.15（提升超过15%）
+
+        处理：
+        - 将增量部分压缩到原增量的50%
+        - 如果original_final_score不存在或pattern_score不存在，跳过
+        """
+        dampened_count = 0
+        for c in candidates:
+            orig = c.get('original_final_score', None)
+            ps = c.get('pattern_score', None)
+            if orig is None or ps is None:
+                continue
+            current = c.get('final_score', orig)
+            if current <= orig * 1.15:
+                continue
+            # 压缩增量：overage = current - orig * 1.15 截半
+            overage = current - orig * 1.15
+            capped = current - overage * 0.5
+            c['final_score'] = min(capped, 1.0)
+            dampened_count += 1
+
+        if dampened_count > 0:
+            print(f"[DLT-Fusion] 📉 模式池评分衰减: {dampened_count}注过度加分被压缩")
+
+        return candidates
 
     def _apply_diversity_penalty(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

@@ -1,9 +1,9 @@
 {
-  "skill_name": "大乐透预测 V3.1.1",
-  "version": "3.1.1",
-  "release_date": "2026-06-14",
-  "reference_sync_version": "3.1.1",
-  "reference_sync_date": "2026-06-14",
+  "skill_name": "大乐透预测 V3.1.2",
+  "version": "3.1.2",
+  "release_date": "2026-06-16",
+  "reference_sync_version": "3.1.2",
+  "reference_sync_date": "2026-06-16",
   "author": "J.A.R.V.I.S.",
   "description": "大乐透（DLT）智能预测 - 六池+趋势池修正+尾号聚合+AC值跟踪+偏差校准",
   "data_source": {
@@ -41,7 +41,7 @@
       {"name": "prime", "weight": 0.07, "desc": "1-35中11个质数的命中数"},
       {"name": "ac_value", "weight": 0.12, "desc": "算术复杂度"}
     ],
-    "integration": "模式池(第7池): 从高频模式反推号码集合; 评分增强: base + 模式匹配度×35%"
+    "integration": "模式池(第7池): 从高频模式反推号码集合; 评分增强: base + 模式匹配度×20%(V3.1.2校准)"
   },
   "neural_models": {
     "tabnet": {"status": "active", "input_dim": 12, "hidden_dim": 64, "framework": "PyTorch"},
@@ -55,7 +55,7 @@
     "parity_enrichment": "奇偶比分布补充：强制覆盖4:1和1:4等易缺失模式（V3.0.2新增）",
     "compound_independent_sampling": "复式方案独立采样：扩展2倍候选池+三区强制覆盖（V3.0.2新增）",
     "zone_drift_enhanced": "区间漂移检测增强：阈值0.15→0.10，调整幅度8%→15%（V3.0.2优化）",
-    "skip_repeat_booster": "隔期重号评分增强 ×1.15~×1.28 + 双期重号候选池（V3.0.2升级）",
+    "skip_repeat_booster": "隔期重号评分增强 ×1.15~×1.28 + 双期重号候选池（V3.0.2升级，V3.1.1弱化）",
     "smart_repeat_penalty": "热号堆叠放松 ×0.97、冷号趋势延续 ×1.04（V3.0.2优化）",
     "tail_aggregation": "尾号≤3种降3%、4种(1重复)加1%",
     "ac_tracking": "基于近100期AC值概率分布调整候选",
@@ -67,6 +67,7 @@
     "sum_momentum_decay": "和值动量衰减：连续≥3期下降时趋势池强度×1.5，小号区扩大到1-12（V3.1.1新增）",
     "hot_decay_bottleneck": "热号衰减瓶颈：连续出现≥3期号码×0.7权重（V3.1.1新增）",
     "back_segment_coverage": "后区5-8段强制至少2个号码（V3.1.1新增）",
+    "pattern_pool_calibration": "模式池评分校准：硬编码分0.6→0.52，boost_weight 0.35→0.20，增量压缩50%（V3.1.2新增）",
     "compound_zone_quota": "复式前区池20%/区最低配额+后区段覆盖1-4/5-8/9-12（V3.0.3修复）"
   },
   "constraint_engine": {
