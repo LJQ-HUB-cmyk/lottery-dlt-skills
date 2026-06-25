@@ -572,6 +572,31 @@ class FivePoolFusion:
 
         return self.sample_from_fused_pool(zone, pool_weights, n, temperature)
 
+    def generate_back_enumeration(self, n: int = 5) -> List[List[int]]:
+        """
+        [方向C] 后区全枚举(66选2) + K-Medoids覆盖优化
+        枚举所有C(12,2)=66个后区组合, 评分后选最优n个
+        """
+        scores = self.generate_fused_pool_scores('back')
+        def _back_score(combo):
+            return sum(scores.get(d, {}).get('weighted', 0.5) for d in combo) / 2.0
+        candidates = sorted([(list(c), _back_score(c)) for c in __import__('itertools').combinations(range(1, 13), 2)],
+                           key=lambda x: -x[1])
+        top30 = [c for c, _ in candidates[:30]]
+        if len(top30) <= n:
+            return [list(c) for c, _ in candidates[:n]]
+        selected = [top30[0]]
+        remaining = top30[1:]
+        while len(selected) < n and remaining:
+            best_idx, best_dist = 0, -1
+            for i, cand in enumerate(remaining):
+                min_dist = min(sum((a-b)**2 for a in cand for b in s)**0.5 for s in selected)
+                if min_dist > best_dist:
+                    best_dist, best_idx = min_dist, i
+            selected.append(remaining.pop(best_idx))
+        selected.sort()
+        return selected
+
     def diagnose_fusion(self, zone: str = 'front') -> Dict:
         """
         诊断融合评分质量（调试用）

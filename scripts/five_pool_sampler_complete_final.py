@@ -101,46 +101,52 @@ class MultiPoolSampler:
     
     def generate_hot_pool(self, n: int = 10, zone: str = 'front') -> List[int]:
         """
-        热号池：最近30期出现次数最多的号码
-        
-        Args:
-            n: 返回的热号数量
-            zone: 'front' 或 'back'
-            
-        Returns:
-            List[int]: 热号列表
+        [方向A] 热号池：动态分位数阈值替代固定Top-N
+        取频率 > mean + 0.5*std 的号码，至少n个
         """
         scores = self._get_hot_cold_scores(zone)
-        
-        # 按评分降序排序
-        sorted_nums = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        
-        # 返回前n个热号
-        hot_pool = [num for num, score in sorted_nums[:n]]
-        
-        print(f"🔥 生成{zone}热号池: {hot_pool}")
+        vals = list(scores.values())
+        mean_v = sum(vals) / len(vals) if vals else 0
+        std_v = (sum((v - mean_v)**2 for v in vals) / len(vals))**0.5 if vals else 0
+        threshold = mean_v + 0.5 * std_v
+        hot_pool = sorted([num for num, s in scores.items() if s >= threshold],
+                          key=lambda x: -scores[x])
+        if len(hot_pool) < n:
+            sorted_nums = sorted(scores.items(), key=lambda x: -x[1])
+            extra = [num for num, _ in sorted_nums if num not in hot_pool]
+            hot_pool.extend(extra[:n - len(hot_pool)])
+        hot_pool = hot_pool[:n]
+        print(f"🔥 生成{zone}热号池(阈值={threshold:.3f}): {hot_pool}")
         return hot_pool
     
     def generate_cold_pool(self, n: int = 10, zone: str = 'front') -> List[int]:
         """
-        冷号池：最近30期出现次数最少的号码
-        
-        Args:
-            n: 返回的冷号数量
-            zone: 'front' 或 'back'
-            
-        Returns:
-            List[int]: 冷号列表
+        [方向A] 冷号池：动态分位数阈值，取频率 < mean - 0.5*std
+        强制包含极冷号(遗漏>50期)
         """
         scores = self._get_hot_cold_scores(zone)
-        
-        # 按评分升序排序
-        sorted_nums = sorted(scores.items(), key=lambda x: x[1])
-        
-        # 返回前n个冷号
-        cold_pool = [num for num, score in sorted_nums[:n]]
-        
-        print(f"❄️ 生成{zone}冷号池: {cold_pool}")
+        vals = list(scores.values())
+        mean_v = sum(vals) / len(vals) if vals else 0
+        std_v = (sum((v - mean_v)**2 for v in vals) / len(vals))**0.5 if vals else 0
+        threshold = mean_v - 0.5 * std_v
+        cold_pool = sorted([num for num, s in scores.items() if s <= threshold],
+                           key=lambda x: scores[x])
+        if len(cold_pool) < n:
+            sorted_nums = sorted(scores.items(), key=lambda x: x[1])
+            extra = [num for num, _ in sorted_nums if num not in cold_pool]
+            cold_pool.extend(extra[:n - len(cold_pool)])
+        # 强制包含遗漏>50期的极冷号
+        from collections import Counter
+        if zone == 'front':
+            hist = [d[0] for d in self.draws] if hasattr(self, 'draws') else []
+            recent_30 = hist[-30:] if len(hist) >= 30 else hist
+            cnt = Counter(recent_30)
+            for num in range(1, 36):
+                if cnt.get(num, 0) == 0 and len(cold_pool) > 0:
+                    if num not in cold_pool:
+                        cold_pool[-1] = num  # 替换最热的"冷号"
+        cold_pool = cold_pool[:n]
+        print(f"❄️ 生成{zone}冷号池(阈值={threshold:.3f}): {cold_pool}")
         return cold_pool
     
     def generate_balance_pool(self, n: int = 10, zone: str = 'front') -> List[int]:

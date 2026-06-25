@@ -427,10 +427,44 @@ class DLTFusionComplete:
         return results
 
     def get_back_recommendations(self) -> List[List[int]]:
-        """获取后区推荐（返回后区号码对列表）"""
-        raw = self.back_fusion.generate_recommendations(n=5)
-        # raw = List[Tuple[List[int], Dict[str,float]]]
-        return [back_pair for back_pair, _ in raw]
+        """
+        [方向C] 后区全枚举(66选2) + K-Medoids覆盖优化
+        用fused_pool评分 + K-Medoids多样性选择
+        """
+        from itertools import combinations
+        # 用pool_sampler获取每个后区号码的频率评分
+        back_scores = {}
+        hc_scores = self.pool_sampler._get_hot_cold_scores('back')
+        for num in range(1, 13):
+            base = hc_scores.get(num, 0.5)
+            # 补充池归属加分
+            hot = self.pool_sampler.generate_hot_pool(20, 'back')
+            cold = self.pool_sampler.generate_cold_pool(20, 'back')
+            bal = self.pool_sampler.generate_balance_pool(20, 'back')
+            bonus = 0
+            if num in hot: bonus += 0.2
+            if num in cold: bonus += 0.1
+            if num in bal: bonus += 0.15
+            back_scores[num] = base + bonus
+        # 枚举66个后区对
+        candidates = []
+        for combo in combinations(range(1, 13), 2):
+            c = list(combo)
+            score = (back_scores[c[0]] + back_scores[c[1]]) / 2
+            candidates.append((c, score))
+        candidates.sort(key=lambda x: -x[1])
+        # K-Medoids
+        top30 = [c for c, _ in candidates[:30]]
+        selected = [top30[0]]
+        remaining = top30[1:]
+        while len(selected) < 5 and remaining:
+            best_idx, best_dist = 0, -1
+            for i, cand in enumerate(remaining):
+                min_dist = min(abs(cand[0]-s[0]) + abs(cand[1]-s[1]) for s in selected)
+                if min_dist > best_dist:
+                    best_dist, best_idx = min_dist, i
+            selected.append(remaining.pop(best_idx))
+        return sorted(selected)
 
     def generate_compound_bets(self, bet_type: str = '6+3', n_per_type: int = 2) -> Dict[str, List[Dict]]:
         """
@@ -1425,6 +1459,7 @@ class DLTFusionComplete:
 
         result = {
             'single_bets': unique[:top_n],
+            'period': self._get_latest_period(),
         }
 
         # 添加复式投注推荐
