@@ -312,7 +312,7 @@ def main():
         elif args.command == 'info':
             print(f"\n{'='*60}")
             print(f"  DLT 大乐透多策略融合预测系统")
-            print(f"  {VERSION} — 六池采样+选择性预测+祖先采样+可解释性 (V3.9.0)")
+            print(f"  {VERSION} — 六池采样+选择性预测+祖先采样+可解释性")
             print(f"{'='*60}")
             print(f"\n核心策略:")
             print(f"  🔥 热号池(30%)  ❄️ 冷号池(15%)  ⚖️ 均衡池(20%)")

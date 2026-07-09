@@ -138,8 +138,8 @@ class MultiPoolSampler:
         # 强制包含遗漏>50期的极冷号
         from collections import Counter
         if zone == 'front':
-            hist = [d[0] for d in self.draws] if hasattr(self, 'draws') else []
-            recent_30 = hist[-30:] if len(hist) >= 30 else hist
+            hist = [num for d in self.draws for num in d[0]] if hasattr(self, 'draws') else []
+            recent_30 = hist[-150:] if len(hist) >= 150 else hist
             cnt = Counter(recent_30)
             for num in range(1, 36):
                 if cnt.get(num, 0) == 0 and len(cold_pool) > 0:

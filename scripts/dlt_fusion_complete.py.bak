@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DLT多策略融合完全体 — 单源版本定义见 version.py
+DLT多策略融合完全体 V3.0.0
 整合策略融合引擎 + 六池采样 + 后区融合 + 博弈论 + 遗传算法 + 数学过滤 + 统计分析
 + 隔期重号增强(SkipRepeatBooster) + 双期参考候选 + 后区隔期重号 + 智能重号惩罚 + 趋势池+尾号检测+AC值+偏差校准
 """
@@ -690,10 +690,8 @@ class DLTFusionComplete:
 
     def get_back_recommendations(self) -> List[List[int]]:
         """
-        [方向C-V3.2.0] 后区全枚举(66选2) + 错位交叉配对
-        【方案2】每个热门后区号码至少与3个不同搭档配对，
-        确保后区两码不会集中在同一搭档线上。
-        用fused_pool评分 + 交叉覆盖优化
+        [方向C] 后区全枚举(66选2) + K-Medoids覆盖优化
+        用fused_pool评分 + K-Medoids多样性选择
         """
         from itertools import combinations
         # 用pool_sampler获取每个后区号码的频率评分
@@ -717,126 +715,17 @@ class DLTFusionComplete:
             score = (back_scores[c[0]] + back_scores[c[1]]) / 2
             candidates.append((c, score))
         candidates.sort(key=lambda x: -x[1])
-
-        # ====== V3.2.0 错位交叉配对 ======
-        # 1. 取top-6单号码（按个体评分降序）
-        single_scores = sorted(back_scores.items(), key=lambda x: -x[1])
-        top6_nums = [n for n, _ in single_scores[:6]]
-
-        # 2. 对每个top6号码，从top-30候选对里找出含该号码的配对
-        top30_pairs = [c for c, _ in candidates[:30]]
-        partner_map = {n: [] for n in top6_nums}
-        for pair in top30_pairs:
-            n1, n2 = pair
-            if n1 in partner_map:
-                partner_map[n1].append(n2)
-            if n2 in partner_map:
-                partner_map[n2].append(n1)
-
-        # 3. 构建交叉矩阵：确保每个top6号码出现在至少2-3个不同配对中
-        selected = []
-        usage_count = {n: 0 for n in top6_nums}
-        # 先从最高分候选对开始，但跳过会导致某号码过度集中的配对
-        for pair, score in candidates:
-            if len(selected) >= 5:
-                break
-            n1, n2 = pair
-            # 只能用top6内的号码做主心骨，但允许非top6号码做配角
-            if n1 not in top6_nums and n2 not in top6_nums:
-                if len(selected) <= 2:
-                    # 前2注可以用全非top6配对（确保冷门也有机会）
-                    pass
-                else:
-                    continue
-            # 检查过度集中
-            if n1 in usage_count and usage_count[n1] >= 3:
-                continue
-            if n2 in usage_count and usage_count[n2] >= 3:
-                continue
-            # 避免重复
-            if any(list(pair) == list(s) for s in selected):
-                continue
-            selected.append(list(pair))
-            if n1 in usage_count:
-                usage_count[n1] += 1
-            if n2 in usage_count:
-                usage_count[n2] += 1
-
-        # 4. 如果还没选满5组，从剩余最高分候选补
-        if len(selected) < 5:
-            for pair, score in candidates:
-                if len(selected) >= 5:
-                    break
-                if any(list(pair) == list(s) for s in selected):
-                    continue
-                selected.append(list(pair))
-
-        # 5. 确保多样性：检查是否有号码出现≥4次，若有则替换最后一组
-        if len(selected) == 5:
-            flat = [n for p in selected for n in p]
-            from collections import Counter as _BC
-            bc = _BC(flat)
-            overused = [n for n, c in bc.items() if c >= 4]
-            if overused:
-                for i in range(4, -1, -1):
-                    if any(n in selected[i] for n in overused):
-                        # 从候选池找一个不含overused号码的替换
-                        for pair, score in candidates:
-                            if pair in [list(s) for s in selected]:
-                                continue
-                            if not any(n in overused for n in pair):
-                                selected[i] = list(pair)
-                                break
-                        break
-
-        # ====== 【V1.5.0-A】后区冷号捕获 ======
-        # 检查后区各号码在近15期的遗漏，遗漏≥8期且非上期号码时
-        # 强制注入至少1组含该号码的配对到selected
-        try:
-            if len(self.draws) >= 15:
-                prev_back = self.draws[-1][1] if len(self.draws) >= 1 else []
-                cold_back_nums = []
-                for num in range(1, 13):
-                    last_15 = [d[1] for d in self.draws[-15:]]
-                    if not any(num in pair for pair in last_15):
-                        cold_back_nums.append(num)
-                # 遗漏≥8期且非上期号码
-                _REAL_COLD_THRESHOLD = 8
-                _last15 = [d[1] for d in self.draws[-15:]]
-                for num in range(1, 13):
-                    _miss = 0
-                    for pair in reversed(_last15):
-                        if num not in pair:
-                            _miss += 1
-                        else:
-                            break
-                    else:
-                        _miss = 15  # 全部遗漏
-                    if _miss >= _REAL_COLD_THRESHOLD:
-                        if num in prev_back:
-                            continue  # 上期刚出过不算真冷
-                        # 检查selected中是否已有含num的配对
-                        _already = any(num in pair for pair in selected)
-                        if not _already:
-                            # 为num找一个最佳搭档
-                            best_partner = None
-                            best_score = -1
-                            for p in range(1, 13):
-                                if p == num:
-                                    continue
-                                pair_score = back_scores.get(p, 0) + 0.3
-                                if pair_score > best_score:
-                                    best_score = pair_score
-                                    best_partner = p
-                            if best_partner is not None:
-                                new_pair = sorted([num, best_partner])
-                                # 替换最后一组或用完哨兵
-                                selected[-1] = new_pair
-                                print(f"[DLT-Fusion] ❄️ 后区冷号注入: {new_pair} (num={num}遗漏{_miss}期)")
-                                break
-        except Exception:
-            pass
-
+        # K-Medoids
+        top30 = [c for c, _ in candidates[:30]]
+        selected = [top30[0]]
+        remaining = top30[1:]
+        while len(selected) < 5 and remaining:
+            best_idx, best_dist = 0, -1
+            for i, cand in enumerate(remaining):
+                min_dist = min(abs(cand[0]-s[0]) + abs(cand[1]-s[1]) for s in selected)
+                if min_dist > best_dist:
+                    best_dist, best_idx = min_dist, i
+            selected.append(remaining.pop(best_idx))
         return sorted(selected)
 
     def generate_compound_bets(self, bet_type: str = '6+3', n_per_type: int = 2) -> Dict[str, List[Dict]]:
@@ -2031,12 +1920,6 @@ class DLTFusionComplete:
         dashboard = self._compute_deviation_dashboard(all_candidates)
         all_candidates = self._recalibrate_confidence(all_candidates, dashboard)
 
-        # 【方案4】回测修正排序
-        try:
-            all_candidates = self._recalibrate_by_backtest(all_candidates)
-        except Exception as e:
-            print(f"[DLT-Fusion] ⚠️ 【方案4】回测修正跳过: {e}")
-
         # Step 7c4: 【P6】约束软化 — 策略通过数作为排序特征而非硬过滤
         try:
             if hasattr(self, 'constraint_engine') and self.constraint_engine is not None:
@@ -2088,65 +1971,6 @@ class DLTFusionComplete:
         except Exception as e:
             print(f"[DLT-Fusion] ⚠️ 盲区补充跳过: {e}")
 
-        # ========== 【V1.5.0-B】WA评级校准层 ==========
-        # 基于近50期回测，统计候选的前区和值+跨度与历史的命中率关联
-        # 对评分做加权修正：命中率高的和值-跨度区间加分，低的减分
-        # 解决#2(0命中)score=0.864与#1(4/7命中)score=0.922仅差6%的问题
-        try:
-            if len(self.draws) >= 50 and len(all_candidates) >= 3:
-                _wa_window = min(50, len(self.draws))
-                _wa_draws = self.draws[-_wa_window:]
-                _wa_hit_rate, _wa_total = {}, {}
-                for d in _wa_draws:
-                    _key = (sum(d[0]) // 10, (max(d[0]) - min(d[0])) // 2)
-                    _wa_total.setdefault(_key, 0)
-                    _wa_hit_rate.setdefault(_key, 0)
-                    _wa_total[_key] += 1
-                for i, d in enumerate(_wa_draws[:-1]):
-                    _key = (sum(d[0]) // 10, (max(d[0]) - min(d[0])) // 2)
-                    _next = _wa_draws[i+1][0]
-                    if len(set(d[0]) & set(_next)) >= 2:
-                        _wa_hit_rate[_key] = _wa_hit_rate.get(_key, 0) + 1
-                _wa_rate = {k: _wa_hit_rate.get(k, 0) / max(_wa_total[k], 1) for k in _wa_total}
-                _global = sum(_wa_hit_rate.values()) / max(sum(_wa_total.values()), 1)
-                _adj_cnt = 0
-                for c in all_candidates:
-                    _f = c.get('front', [1,2,3,4,5])
-                    _key = (sum(_f) // 10, (max(_f) - min(_f)) // 2)
-                    _kr = _wa_rate.get(_key, _global)
-                    if _kr > 0:
-                        adj = max(0.5, min(1.5, _kr / max(_global, 0.01)))
-                        old = c.get('final_score', 0.5)
-                        c['final_score'] = min(max(old * adj, 0.3), 1.0)
-                        c['wa_adjust'] = round(adj, 3)
-                        _adj_cnt += 1
-                if _adj_cnt:
-                    print(f"[DLT-Fusion] 📊 WA评级校准: {_adj_cnt}注调整, global_rate={_global:.3f}")
-        except Exception as e:
-            print(f"[DLT-Fusion] ⚠️ WA校准跳过: {e}")
-
-        # 🎯 【V3.11.0-A】分数归一化+动态展宽: z-score展宽后sigmoid映射到[0.3,1.0]
-        try:
-            scores_arr = [c.get('final_score', c.get('base_score', 0.5)) for c in all_candidates]
-            if scores_arr:
-                import numpy as _np
-                _mean = _np.mean(scores_arr)
-                _std = max(_np.std(scores_arr), 0.01)
-                for c in all_candidates:
-                    raw = c.get('final_score', c.get('base_score', 0.5))
-                    z = (raw - _mean) / _std
-                    # clip to [-3, 3]
-                    z = max(-3.0, min(3.0, z))
-                    # sigmoid → [0.3, 1.0]
-                    sig = 1.0 / (1.0 + _np.exp(-z))
-                    new_s = 0.3 + 0.7 * sig
-                    c['final_score'] = min(max(new_s, 0.3), 1.0)
-                    c['z_score'] = round(z, 2)
-                print(f"[DLT-Fusion] 📊 z-score归一化: mean={_mean:.3f}, std={_std:.3f}, "
-                      f"scores展宽[{min(scores_arr):.3f},{max(scores_arr):.3f}]→[{min(c.get('final_score',0) for c in all_candidates):.3f},{max(c.get('final_score',0) for c in all_candidates):.3f}]")
-        except Exception as e:
-            print(f"[DLT-Fusion] ⚠️ 分数归一化跳过: {e}")
-
         # 【优化3.0.3-⑤】强制配对重号组合
         try:
             all_candidates = self._force_paired_repeat_combo(all_candidates, back_recs)
@@ -2192,11 +2016,9 @@ class DLTFusionComplete:
             _final = candidates[:min(top_n, len(candidates))] if candidates else []
         except Exception:
             _final = []
-        curr_period = self._get_latest_period()
-        next_period = str(int(curr_period) + 1) if curr_period else curr_period
         result = {
             "single_bets": _final,
-            "period": next_period,
+            "period": self._get_latest_period(),
         }
         if include_compound:
             try:
@@ -2207,6 +2029,8 @@ class DLTFusionComplete:
         # 自动存储预测结果
         try:
             from prediction_store import store_prediction
+            curr_period = self._get_latest_period()
+            next_period = str(int(curr_period) + 1) if curr_period else curr_period
             compound_arg = result.get("compound_bets", {})
             if not compound_arg:
                 compound_arg = None
@@ -2686,101 +2510,30 @@ class DLTFusionComplete:
         top_missing = [n for n, _ in sorted_missing[:2]]
 
         # 需要检查的候选号码
-        # 【V3.1.5-①→V1.5.0-C】Z2中段盲区检测：保底至少3个Z2中段(16-24)号码
-        # 26069期: 实际Z2中段覆盖21,24, 但预测仅Z2中段覆盖<2个号
-        # 增强: 阈值从<2提升到<3, 确保每个Top5候选在Z2中段有足够覆盖
+        # 【V3.1.5-①】Z2中段盲区检测：如果候选集Z2中段(16-24)覆盖率<3个号，强制补充
         covered_z2_mid = set()
         for c in candidates:
             covered_z2_mid.update([n for n in c.get('front', []) if n in z2_mid_nums])
-        if len(covered_z2_mid) < 3:
-            # Z2中段覆盖不足，补充到至少3个
+        if len(covered_z2_mid) < 2:
+            # Z2中段严重不足，添加最热门的2个遗漏号
             z2_mid_missing = [n for n in z2_mid_nums if n not in covered_z2_mid]
+            # 按历史频率排序，取最热门的遗漏号
             z2_mid_freq = {n: sum(1 for d in self.draws[-30:] if n in d[0]) for n in z2_mid_missing}
             z2_mid_to_add = sorted(z2_mid_missing, key=lambda n: -z2_mid_freq.get(n, 0))[:3]
             if z2_mid_to_add:
-                print(f"[DLT-Fusion] 🔍 Z2中段覆盖({len(covered_z2_mid)}/3不足), 强制补充{z2_mid_to_add}")
+                print(f"[DLT-Fusion] 🔍 Z2中段覆盖缺失({len(covered_z2_mid)}个), 强制补充{z2_mid_to_add}")
                 for n in z2_mid_to_add:
                     if n not in missing_nums:
                         missing_nums.append(n)
 
-        # 【V1.5.0-D】中遗漏链式补缺: 遗漏6-12期且Z2中段无密集覆盖时强制补入
-        # 26075期18遗漏约8期且16,18,26均是中段, 但仅低分#4包含18
-        try:
-            _MISS_LOW = 6
-            _MISS_HIGH = 12
-            _mid_missing_nums = []
-            for n in range(1, 36):
-                if n in z2_mid_nums:
-                    _cnt = sum(1 for d in self.draws[-_MISS_HIGH:] if n in d[0])
-                    if _cnt == 0 and n not in covered_z2_mid:
-                        _mid_missing_nums.append(n)
-            if _mid_missing_nums:
-                # 按历史最高频排序
-                _freq_30 = {n: sum(1 for d in self.draws[-30:] if n in d[0]) for n in _mid_missing_nums}
-                _to_add = sorted(_mid_missing_nums, key=lambda n: -_freq_30.get(n, 0))[:2]
-                if _to_add:
-                    for n in _to_add:
-                        if n not in missing_nums:
-                            missing_nums.append(n)
-                    print(f"[DLT-Fusion] 🔗 中遗漏链式补缺: {_to_add} (遗漏6-12期中段号)")
-        except Exception:
-            pass
+        check_nums = list(set(boundary_nums + missed_primes + top_missing))
 
-        # 统计当前候选集中每个号码的出现次数 
+        # 统计当前候选集中每个号码的出现次数
         covered = set()
         for c in candidates:
             covered.update(c.get('front', []))
 
-        # 【V3.11.0-B】Z1/Z3均衡注入：当Z1或Z3区覆盖严重不足时强制补号
-        # 26073期实战教训：实际Z1=2个(4,10), Z3=2个(23,33), 预测仅Z1=1个(10)
-        covered_z1 = set(n for n in covered if n in ZONE1)
-        covered_z3 = set(n for n in covered if n in ZONE3)
-        z1_weak = len(covered_z1) < 2
-        z3_weak = len(covered_z3) < 2
-        z1_to_add, z3_to_add = [], []
-        if z1_weak or z3_weak:
-            win30 = min(30, len(self.draws))
-            freq_map = {}
-            for n in range(1, 36):
-                freq_map[n] = sum(1 for d in self.draws[-win30:] if n in d[0])
-            if z1_weak:
-                z1_missing = sorted(ZONE1 - covered_z1, key=lambda n: -freq_map.get(n, 0))
-                z1_to_add = z1_missing[:3]
-            if z3_weak:
-                z3_missing = sorted(ZONE3 - covered_z3, key=lambda n: -freq_map.get(n, 0))
-                z3_to_add = z3_missing[:3]
-            if z1_to_add:
-                print(f"[DLT-Fusion] 🔍 Z1区薄弱(仅{len(covered_z1)}个), 注入{z1_to_add}")
-            if z3_to_add:
-                print(f"[DLT-Fusion] 🔍 Z3区薄弱(仅{len(covered_z3)}个), 注入{z3_to_add}")
-
-        # 【V3.11.0-B】Z2冷号门禁：当Z2区候选数占比≥45%时触发
-        z2_covered_nums = [n for n in covered if n in ZONE2]
-        total_front = len(covered)
-        z2_ratio = len(z2_covered_nums) / max(total_front, 1)
-        z1_active_cold, z3_active_cold_ext = [], []
-        if z2_ratio > 0.45 and len(self.draws) >= 20:
-            win30 = min(30, len(self.draws))
-            freq_map = {}
-            for n in range(1, 36):
-                freq_map[n] = sum(1 for d in self.draws[-win30:] if n in d[0])
-            z1_active_cold = sorted(
-                [n for n in ZONE1 if n not in covered and freq_map.get(n, 0) > 0],
-                key=lambda n: freq_map.get(n, 0)
-            )[:2]
-            z3_active_cold_ext = sorted(
-                [n for n in ZONE3 if n not in covered and freq_map.get(n, 0) > 0],
-                key=lambda n: freq_map.get(n, 0)
-            )[:2]
-            if z1_active_cold or z3_active_cold_ext:
-                print(f"[DLT-Fusion] 🔍 Z2过密(r={z2_ratio:.0%}), Z1冷活{z1_active_cold}/Z3冷活{z3_active_cold_ext}注入")
-
-        check_nums = list(set(boundary_nums + missed_primes + top_missing))
-        # 合并所有需补充号码
         missing_nums = [n for n in check_nums if n not in covered]
-        for n in z1_to_add + z3_to_add + (z1_active_cold or []) + (z3_active_cold_ext or []):
-            if n not in missing_nums and n not in covered:
-                missing_nums.append(n)
         if not missing_nums:
             return candidates
 
@@ -2860,116 +2613,7 @@ class DLTFusionComplete:
             preview = [c['front'] for c in new_cands[:3]]
             more = f"...等{len(new_cands)}注" if len(new_cands) > 3 else ""
             print(f"[DLT-Fusion] 🔍 盲区补充: +{len(new_cands)}个候选 {preview}{more}")
-            candidates = candidates + new_cands
-
-        # ====== 【方案5】三区平衡多样性基线 (V3.2.0) ======
-        # 确保候选集中至少包含：
-        # - 1注偏小(Z1≥2, Z3≤1)：覆盖小号密集区
-        # - 1注偏大(Z3≥2, Z1≤1)：覆盖大号密集区
-        # - 1注均衡(每区1-2个)：覆盖分散分布
-        try:
-            ZONE1 = set(range(1, 13))
-            ZONE2 = set(range(13, 25))
-            ZONE3 = set(range(25, 36))
-
-            has_small = False  # Z1≥2且Z3≤1
-            has_big = False    # Z3≥2且Z1≤1
-            has_balanced = False  # 每区至少1个
-
-            for c in candidates:
-                fs = set(c.get('front', []))
-                z1c = len(fs & ZONE1)
-                z3c = len(fs & ZONE3)
-                if z1c >= 2 and z3c <= 1:
-                    has_small = True
-                if z3c >= 2 and z1c <= 1:
-                    has_big = True
-                if z1c >= 1 and len(fs & ZONE2) >= 1 and z3c >= 1:
-                    has_balanced = True
-
-            missing_types = []
-            if not has_small: missing_types.append('偏小(Z1≥2)')
-            if not has_big: missing_types.append('偏大(Z3≥2)')
-            if not has_balanced: missing_types.append('均衡(三区分布)')
-
-            if missing_types:
-                print(f"[DLT-Fusion] 🔍 【方案5】三区多样性缺失: {missing_types}")
-                # 从历史数据中补充缺失类型
-                import random as _rd
-                _rd.seed(42 + len(candidates))
-                for mtype in missing_types:
-                    # 找历史实际开奖中符合该类型的组合
-                    found = False
-                    for draw_front, draw_back in self.draws[-80:]:
-                        dfs = set(draw_front)
-                        z1c = len(dfs & ZONE1)
-                        z3c = len(dfs & ZONE3)
-                        ok = False
-                        if '偏小' in mtype and z1c >= 2 and z3c <= 1:
-                            ok = True
-                        elif '偏大' in mtype and z3c >= 2 and z1c <= 1:
-                            ok = True
-                        elif '均衡' in mtype and z1c >= 1 and len(dfs & ZONE2) >= 1 and z3c >= 1:
-                            ok = True
-                        if ok:
-                            combo = sorted(draw_front)
-                            k = tuple(combo)
-                            if not any(tuple(c.get('front', [])) == k for c in candidates):
-                                w_base = getattr(self, 'score_weights', {}).get('base', 0.4)
-                                w_gt = getattr(self, 'score_weights', {}).get('gt', 0.3)
-                                w_genetic = getattr(self, 'score_weights', {}).get('genetic', 0.3)
-                                candidates.append({
-                                    'front': combo,
-                                    'back': sorted(draw_back),
-                                    'base_score': 0.55,
-                                    'gt_score': 0.5,
-                                    'genetic_score': 0.5,
-                                    'final_score': 0.55 * w_base + 0.5 * w_gt + 0.5 * w_genetic,
-                                    'source': 'zone_diversity',
-                                    'strategy_name': f'三区多样性-{mtype}',
-                                })
-                                print(f"[DLT-Fusion] 🔍 三区多样性补充: {mtype} → {combo}")
-                                found = True
-                                break
-                    if not found:
-                        # 兜底生成
-                        from itertools import combinations as _zcomb
-                        all_nums = list(range(1, 36))
-                        z1_nums = sorted(ZONE1)
-                        z2_nums = sorted(ZONE2)
-                        z3_nums = sorted(ZONE3)
-                        fill_combo = None
-                        try:
-                            if '偏小' in mtype:
-                                # 从Z1取2-3个，Z2取2-3个，Z3取0-1个
-                                pick = sorted(_rd.sample(z1_nums, 2) + _rd.sample(z2_nums, 2) + _rd.sample(z3_nums, 1))
-                                if len(pick) == 5:
-                                    fill_combo = pick
-                            elif '偏大' in mtype:
-                                pick = sorted(_rd.sample(z3_nums, 2) + _rd.sample(z2_nums, 2) + _rd.sample(z1_nums, 1))
-                                if len(pick) == 5:
-                                    fill_combo = pick
-                            elif '均衡' in mtype:
-                                pick = sorted(_rd.sample(z1_nums, 2) + _rd.sample(z2_nums, 2) + _rd.sample(z3_nums, 1))
-                                if len(pick) == 5:
-                                    fill_combo = pick
-                        except Exception:
-                            pass
-                        if fill_combo:
-                            if not any(tuple(c.get('front', [])) == tuple(fill_combo) for c in candidates):
-                                candidates.append({
-                                    'front': sorted(fill_combo),
-                                    'back': sorted([1, 12]),
-                                    'base_score': 0.5,
-                                    'gt_score': 0.5,
-                                    'genetic_score': 0.5,
-                                    'final_score': 0.5,
-                                    'source': 'zone_diversity_fallback',
-                                    'strategy_name': f'三区多样性-{mtype}(兜底)',
-                                })
-                                print(f"[DLT-Fusion] 🔍 三区多样性兜底: {mtype} → {sorted(fill_combo)}")
-        except Exception as e:
-            print(f"[DLT-Fusion] ⚠️ 【方案5】三区多样性跳过: {e}")
+            return candidates + new_cands
 
         return candidates
 
@@ -3463,18 +3107,11 @@ class DLTFusionComplete:
         self, candidates: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        隔期重号评分增强（V3.2.0 重号灵敏度版）：
+        隔期重号评分增强（V3.1.1 弱化版）：候选与draws[-2](上上期)号码匹配时加分。
 
-        【方案3-1】当上期前区有≥3个号码且分布在≥2个三区时，
-        判断为重号密集期，boost翻倍。
-        26074实战：上期(26073)前区04,10,22,23,33分布在Z1,Z2,Z3，
-        实际26074开出3个重号(04,10,23)，模型仅捕捉到2个且分散。
-
-        V3.1.1 基线：仅当号码连续出现≥4期才启动1.10倍。
-        V3.2.0 增强：
-        - 上期重号密集(≥3个前区且跨≥2区) → 1.20倍
-        - 连续≥4期 → 1.15倍
-        - 仅普通隔期匹配 → 1.05倍（原无加成）
+        V3.1.1 变更：移除隔期重号增强的激进加成，重号处理已由模式识别的重号特征(权重15%)
+        和智能重号惩罚共同覆盖，隔期增强只保留极轻度兜底加成，避免过度押注连续重号。
+        仅当号码连续出现≥4期时才启动中等增强。
 
         Returns:
             评分调整后的候选列表
@@ -3483,29 +3120,12 @@ class DLTFusionComplete:
             return candidates
 
         skip_front = set(self.draws[-2][0])
-        latest_front = self.draws[-1][0]
-
-        # 【方案3-1】检测上期重号密集度
-        # 检查上期前区号码是否分布在≥2个三区
-        Z1 = {1,2,3,4,5,6,7,8,9,10,11,12}
-        Z2 = {13,14,15,16,17,18,19,20,21,22,23,24}
-        Z3 = {25,26,27,28,29,30,31,32,33,34,35}
-        lf_set = set(latest_front)
-        zone_hit = sum(1 for z in [Z1, Z2, Z3] if lf_set & z)
-        # 上期前区中是否有≥3个号码是上上期的重号？
-        prev_overlap = len(lf_set & skip_front)
-        dense_repeat = (prev_overlap >= 3 and zone_hit >= 2)
-
         boost_count = 0
+
         for c in candidates:
             c_front = set(c.get('front', []))
             front_skip_overlap = len(c_front & skip_front)
             if front_skip_overlap < 2:
-                # 即使是1个重号，密集期也给予轻微加分
-                if dense_repeat and front_skip_overlap == 1:
-                    orig = c.get('final_score', c.get('base_score', 1.0))
-                    c['final_score'] = orig * 1.03
-                    boost_count += 1
                 continue
 
             orig = c.get('final_score', c.get('base_score', 1.0))
@@ -3524,29 +3144,15 @@ class DLTFusionComplete:
 
             max_consecutive = max(consecutive_appearances.values()) if consecutive_appearances else 0
 
-            if dense_repeat and front_skip_overlap >= 2:
-                # 重号密集期 + 隔期匹配 ≥ 2 → 强增强
-                multiplier = 1.20
-                boost_count += 1
-            elif max_consecutive >= 4:
-                multiplier = 1.15
-                boost_count += 1
-            elif front_skip_overlap >= 3:
-                # 匹配3个隔期号码，给予中等增强（V3.2.0新增）
+            if max_consecutive >= 4:
                 multiplier = 1.10
-                boost_count += 1
-            elif front_skip_overlap >= 2:
-                # 匹配2个隔期号码，轻度增强（V3.2.0新增）
-                multiplier = 1.05
                 boost_count += 1
 
             if multiplier > 1.0:
                 c['final_score'] = orig * multiplier
 
         if boost_count > 0:
-            tag = "🚀" if not dense_repeat else "🔥"
-            dense_tag = f" (重号密集期detected)" if dense_repeat else ""
-            print(f"[DLT-Fusion] {tag} 隔期重号增强: {boost_count}注受加成{dense_tag}")
+            print(f"[DLT-Fusion] 🚀 隔期重号增强(弱化): {boost_count}注受加成 (阈值≥4期连续)")
 
         return candidates
 
@@ -3790,22 +3396,7 @@ class DLTFusionComplete:
         high_freq_prev = [n for n in prev_front if num_count.get(n, 0) / total >= 0.3]
 
         if len(high_freq_prev) < 2:
-            # 【V3.2.0】即使单人高频重号<2个，也检查是否有漏掉的上期号码
-            # 26074期：上期重号04,10,23中23仅出现1次，未能触发配对
-            # 处理：如果上期有≥2个号码在候选集中出现但频次<30%，仍强制配对
-            from collections import Counter as _FC
-            prev_covered = Counter()
-            for c in candidates:
-                for n in c.get('front', []):
-                    if n in set(self.draws[-1][0]):
-                        prev_covered[n] += 1
-            # 找频次最少的2个上期号码，强制配对
-            lowest = sorted(prev_covered.items(), key=lambda x: x[1])[:2]
-            if len(lowest) >= 2:
-                high_freq_prev = [n for n, _ in lowest]
-                print(f"[DLT-Fusion] 🔗 重号分散修复: 强制配对低频上期号码 {high_freq_prev}")
-            else:
-                return candidates
+            return candidates
 
         # 取最高频的2-3个，与其他号码配对
         high_freq_prev = sorted(high_freq_prev, key=lambda n: -num_count.get(n, 0))[:3]
@@ -4767,113 +4358,6 @@ class DLTFusionComplete:
         return candidates
 
     # ------------------------------------------------------------------
-    # 【方案4】回测修正排序 (Backtest-Corrected Score)
-    # ------------------------------------------------------------------
-
-    def _recalibrate_by_backtest(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        回测修正排序（V3.2.0）：基于最近5-10期的模式相似度修正final_score。
-
-        思路：每个候选号码可以拆解为多个"特征指纹"（如和值区间、奇偶比、AC值区间、
-        Z1/Z2/Z3分布等），通过匹配最近N期的成功模式来调整评分。
-
-        对每个候选做以下检测：
-        1. 和值区间匹配度 — 候选和值落在最近5期最佳命中的和值区间内？+2%
-        2. 奇偶比匹配度 — 候选奇偶比在历史最佳命中率高的比例中？+1%
-        3. AC值匹配度 — 候选AC值在最近5期常见AC值附近？+1%
-        4. 重号模式匹配 — 候选包含的重号数量是否与最近3期平均重号数一致？±2%
-
-        Returns:
-            评分调整后的候选列表
-        """
-        if not candidates or len(self.draws) < 6:
-            return candidates
-
-        try:
-            window = min(10, len(self.draws) - 1)
-            # 统计最近N期的最佳命中模式
-            hit_patterns = {
-                'sum_ranges': [],      # 和值区间
-                'parities': [],        # 奇偶比
-                'ac_ranges': [],       # AC值区间
-                'repeat_counts': [],   # 重号数
-            }
-
-            for i in range(1, window + 1):
-                draw = self.draws[-i]
-                hit_patterns['sum_ranges'].append(sum(draw[0]))
-                parity = sum(1 for n in draw[0] if n % 2 == 1)
-                hit_patterns['parities'].append(parity)
-                # AC值简化计算：跨度级别
-                span = max(draw[0]) - min(draw[0])
-                hit_patterns['ac_ranges'].append(span)
-                # 重号数（与上一期比较）
-                if i < len(self.draws):
-                    prev_draw = self.draws[-i - 1]
-                    repeat = len(set(draw[0]) & set(prev_draw[0]))
-                    hit_patterns['repeat_counts'].append(repeat)
-
-            # 使用统计区间
-            from collections import Counter as _PatCnt
-            sum_avg = sum(hit_patterns['sum_ranges']) / max(len(hit_patterns['sum_ranges']), 1)
-            sum_std = (max(hit_patterns['sum_ranges']) - min(hit_patterns['sum_ranges'])) / max(4, 1)
-            parity_mode = _PatCnt(hit_patterns['parities']).most_common(1)[0][0] if hit_patterns['parities'] else 3
-            span_avg = sum(hit_patterns['ac_ranges']) / max(len(hit_patterns['ac_ranges']), 1)
-            span_std = (max(hit_patterns['ac_ranges']) - min(hit_patterns['ac_ranges'])) / max(4, 1)
-            repeat_default = int(round(sum(hit_patterns['repeat_counts']) / max(len(hit_patterns['repeat_counts']), 1))) if hit_patterns['repeat_counts'] else 1
-
-            adj_count = 0
-            for c in candidates:
-                front = c.get('front', [])
-                if not front:
-                    continue
-                orig = c.get('final_score', c.get('base_score', 0.5))
-                boost = 1.0
-
-                # 和值匹配
-                fsum = sum(front)
-                if abs(fsum - sum_avg) <= sum_std * 1.5:
-                    boost *= 1.02
-                elif abs(fsum - sum_avg) > sum_std * 3:
-                    boost *= 0.97
-
-                # 奇偶比匹配
-                cand_parity = sum(1 for n in front if n % 2 == 1)
-                if cand_parity == parity_mode:
-                    boost *= 1.01
-
-                # 跨度(AC值代理)匹配
-                cspan = max(front) - min(front) if front else 30
-                if abs(cspan - span_avg) <= span_std * 1.5:
-                    boost *= 1.01
-                elif abs(cspan - span_avg) > span_std * 3:
-                    boost *= 0.98
-
-                # 重号数匹配
-                if len(self.draws) >= 2:
-                    latest = set(self.draws[-1][0])
-                    cand_repeat = len(set(front) & latest)
-                    if cand_repeat == repeat_default:
-                        boost *= 1.02
-                    elif cand_repeat > repeat_default + 1:
-                        boost *= 0.98
-
-                if abs(boost - 1.0) > 0.005:
-                    c['final_score'] = orig * boost
-                    c['backtest_corrected'] = True
-                    adj_count += 1
-
-            if adj_count > 0:
-                print(f"[DLT-Fusion] 📊 【方案4】回测修正排序: {adj_count}/{len(candidates)}注调整 "
-                      f"(和值±{sum_std:.0f}, 奇偶模式{parity_mode}:{5-parity_mode}, "
-                      f"跨度±{span_std:.0f}, 重号预期{repeat_default})")
-
-        except Exception as e:
-            print(f"[DLT-Fusion] ⚠️ 【方案4】回测修正跳过: {e}")
-
-        return candidates
-
-    # ------------------------------------------------------------------
     # 🎲 命中概率计算（增强输出）
     # ------------------------------------------------------------------
 
@@ -5439,11 +4923,9 @@ class DLTFusionComplete:
     # ------------------------------------------------------------------
 
 def main():
-    from version import VERSION as _V
-    bar = "=" * 60
-    print(bar)
-    print(f"  DLT多策略融合完全体 V{_V}")
-    print(bar)
+    print("=" * 60)
+    print("  DLT多策略融合完全体 V3.0.0")
+    print("=" * 60)
 
     data_path = data_dir()
 

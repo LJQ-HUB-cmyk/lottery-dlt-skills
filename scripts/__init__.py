@@ -1,6 +1,9 @@
-"""DLT大乐透预测技能 — Python包入口 V3.0.0
-所有核心模块统一从这里导出，import 后可直接使用。
+"""DLT大乐透预测技能 — Python包入口
+所有核心模块统一从这里导出，VERSION 从 version.py 单源定义。
 """
+
+# ── 版本单源定义 ──
+from version import VERSION, RELEASE_DATE, BANNER
 
 # ── 顶层入口 ──
 from dlt_fusion_complete import DLTFusionComplete, data_dir, check_reference_sync

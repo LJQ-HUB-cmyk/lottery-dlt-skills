@@ -8,9 +8,12 @@ DLT 版本升级工具 — 一次命令更新所有版本号
     python3 bump_version.py 3.2.0 2026-06-20  # 指定日期
 
 自动更新：
-  - scripts/version.py          ← 单源版本定义
-  - references/dlt_skill_config.json ← skill_name / version / reference_sync_version
+  - scripts/version.py          ← 单源版本定义 (含自动派生的 BANNER)
+  - references/dlt_skill_config.json ← skill_name / version / reference_sync_version / reference_sync_date
   - SKILL.md                    ← 标题中的版本号
+
+⚠️  单源原则：version.py 的 VERSION 变更后，
+   banner (BANNER) 由 f-string 自动派生，不需手动维护
 """
 
 import sys
@@ -53,12 +56,14 @@ def update_config_json(new_ver):
         config = json.load(f)
 
     updated = False
-    for key in ['skill_name', 'version', 'reference_sync_version']:
+    for key in ['skill_name', 'version', 'reference_sync_version', 'reference_sync_date']:
         if key in config:
             old_val = config[key]
             if key == 'skill_name':
                 # "大乐透预测 V3.1.2" → "大乐透预测 V3.1.3"
                 new_val = re.sub(r'V[\d.]+', f'V{new_ver}', old_val)
+            elif key == 'reference_sync_date':
+                new_val = new_date
             else:
                 new_val = new_ver
             if old_val != new_val:
