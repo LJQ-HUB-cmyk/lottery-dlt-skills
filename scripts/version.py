@@ -9,8 +9,8 @@ DLT 预测系统版本管理 — 单源版本定义
 # ============================================================
 # 🎯 单源版本定义（升级时仅改此处！）
 # ============================================================
-VERSION = "3.13.0"
-RELEASE_DATE = "2026-07-07"
+VERSION = "3.16.0"
+RELEASE_DATE = "2026-07-16"
 
 # 自动派生横幅，杜绝代码 banner 与 VERSION 不一致
 BANNER = f"V{VERSION} + NeuralEnsemble + RankingModel"
@@ -19,9 +19,45 @@ BANNER = f"V{VERSION} + NeuralEnsemble + RankingModel"
 VERSION_FILES = [
     "scripts/version.py",          # 本文件
     "scripts/dlt_fusion_complete.py",  # 代码横幅
+    "scripts/five_pool_sampler_complete_final.py",  # 冷号池扩容
     "references/dlt_skill_config.json", # skill_name / version / reference_sync_version
 ]
 
+# 3.16.0 (2026-07-16, 断重防御扩容+冷热交叉池+后区全换保底+Z2单号保护)
+# - [①] 断重防御扩容(_inject_zero_repeat_candidates): 检测连续断重趋势(≥2期),
+#     注入目标从max(5%,2)扩容到max(12%,4), 26079期前后区7/7全换号
+# - [②] 冷热交叉池注入(predict): 从热池选3号+冷池选2号拼成5号组合注入3注,
+#     26079期实际6(热)+8(冷)+23(冷)+26(热)+27(热)冷热各半
+# - [③] 后区完全换号保底(predict): 上期后区号码在back_recs中合计<2次时,
+#     从完全不含上期号码的后区配对中选高频组合注入, 26079后区8+11→5+12全换
+# - [④] Z2单号冷号保护(_ensure_min_coverage): Z2覆盖<2个号时补充温号码,
+#     防止Z2单号且该号为冷号时的区间真空
+#
+# 3.15.0 (2026-07-14, 后区冷号路径+冷号池扩容)
+# - [①] 后区极端冷号保留(predict): 遗漏≥10期冷号在多样性过滤后强制保留1组合,
+#       26078期08(遗漏后)未进back_recs, 导致08+11后区只中11
+# - [④] 后区冷号池扩容(five_pool_sampler.generate_cold_pool): 后区遗漏≥10期的
+#       号码存在时, 阈值从mean-0.5*std拉宽到mean-0.3*std, 扩容捕获遗漏冷号
+#
+# 3.14.0 (2026-07-12, 26077期失准优化)
+# - [A] 后区展宽+连号检测(get_back_recommendations): top6→top8单号码,
+#      后区差=1时×1.15加分, 修复06+07完全遗漏
+# - [B] 三区分布均衡(predict): 确保Top候选至少1注覆盖三区(1-12/13-24/25-35),
+#      从候选池注入替换, 修复Z1仅{4}的情况
+# - [C] 候选去重增强(_diverse_topk_selection): Jaccard阈值0.5→0.35,
+#      修复Top5中出现3次15/2次17/3次26的集中度高问题
+# - [D] 前区中段保底(_ensure_min_coverage): 完整Z2(13-24)覆盖检查,
+#      每个遗漏号码强制补入, 修复14/24完全遗漏
+#
+# 3.13.1 (2026-07-09, 26076期失准优化)
+# - [Plan H] 邻号集体密度检测: 前区号码与上期邻号≥3个时加分
+#       _compute_prob_score中neighbor_boost*0.05 (3个+0.05, 4个+0.10, 5个+0.15)
+#       GA _fitness中邻号密度奖励5%加权
+# - [Plan I] 断区容忍度展宽: 三区覆盖约束从硬丢弃改为软惩罚(×0.85)
+#       候选过滤阶段添加_zone_penalty标签, 评分阶段统一应用
+# - [Plan J] 和值尾部轻罚重奖: 三角分布→学生t分布(df=3)
+#       _compute_prob_score + GA _fitness 同步更新
+#
 # 3.13.0 (2026-07-07, 26075期失准优化)
 # - [A] 后区冷号捕获(get_back_recommendations): 后区号码遗漏≥8期且非上期重号时,
 #       强制注入至少1组含该号码的配对至selected

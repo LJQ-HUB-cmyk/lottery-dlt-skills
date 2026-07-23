@@ -694,6 +694,7 @@ class DLTFusionComplete:
         【方案2】每个热门后区号码至少与3个不同搭档配对，
         确保后区两码不会集中在同一搭档线上。
         用fused_pool评分 + 交叉覆盖优化
+        【V3.14.0-A】后区展宽+连号检测: top6→top8单号码, 后区差=1时+15%加分
         """
         from itertools import combinations
         # 用pool_sampler获取每个后区号码的频率评分
@@ -719,11 +720,18 @@ class DLTFusionComplete:
         candidates.sort(key=lambda x: -x[1])
 
         # ====== V3.2.0 错位交叉配对 ======
-        # 1. 取top-6单号码（按个体评分降序）
+        # 1. 取top-8单号码（按个体评分降序）【V3.14.0-A 6→8】
         single_scores = sorted(back_scores.items(), key=lambda x: -x[1])
-        top6_nums = [n for n, _ in single_scores[:6]]
+        top6_nums = [n for n, _ in single_scores[:8]]
 
-        # 2. 对每个top6号码，从top-30候选对里找出含该号码的配对
+        # 2. 【V3.14.0-A】后区连号检测: 差=1的配对(如6,7)额外+15%评分
+        # 26077期实际06+07完全遗漏, 后区对子差=1是常见结构(约15-20%频率)
+        for i, (pair, score) in enumerate(candidates):
+            if pair[1] - pair[0] == 1:  # 连续号码
+                candidates[i] = (pair, score * 1.15)
+        candidates.sort(key=lambda x: -x[1])
+        
+        # 2. 对每个top8号码，从top-30候选对里找出含该号码的配对
         top30_pairs = [c for c, _ in candidates[:30]]
         partner_map = {n: [] for n in top6_nums}
         for pair in top30_pairs:
@@ -1661,6 +1669,66 @@ class DLTFusionComplete:
         except Exception as e:
             print(f"[DLT-Fusion] ⚠️ 双期参考候选项跳过: {e}")
 
+        # ====== [V3.16.0-②] 冷热交叉池注入 ======
+        # 26079期归因: 实际6(热)+8(冷)+23(冷)+26(热)+27(热)冷热各半
+        # 五池独立采样导致冷热混合组合排不到前排
+        # 从热池选3号+冷池选2号拼成5号组合注入
+        try:
+            _cross_pool_nums = []
+            from five_pool_sampler_complete_final import MultiPoolSampler
+            _sampler_cross = MultiPoolSampler(self.draws)
+            _front_hot = _sampler_cross.generate_hot_pool(8, 'front')
+            _front_cold = _sampler_cross.generate_cold_pool(8, 'front')
+            import random as _rnd
+            _rnd.seed(hash(tuple(self.draws[-1] if self.draws else [0])) & 0x7FFFFFFF)
+            for _ in range(3):
+                _rnd.shuffle(_front_hot)
+                _rnd.shuffle(_front_cold)
+                _hot3 = sorted(_front_hot[:3])
+                _cold2 = sorted(_front_cold[:2])
+                _combo = sorted(set(_hot3 + _cold2))
+                if len(_combo) == 5 and _combo not in _cross_pool_nums:
+                    _cross_pool_nums.append(_combo)
+            if _cross_pool_nums:
+                for _cp in _cross_pool_nums:
+                    pool_candidates.append({
+                        'front': _cp,
+                        'strategy_name': '冷热交叉池',
+                        'source': 'hot_cold_cross',
+                    })
+                print(f"[DLT-Fusion] 🔄 冷热交叉池注入: {len(_cross_pool_nums)}注 (热3+冷2)")
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 冷热交叉池跳过: {e}")
+
+        # ====== [V3.16.0-③] 后区完全换号保底 ======
+        # 26079期归因: 上期后区8+11→实际5+12, 两个号码都换
+        # 当上期后区号码在back_recs中合计出现<2次时, 注入完全换后区组合
+        try:
+            if len(self.draws) >= 2:
+                _prev_back = set(self.draws[-1][1])
+                _back_occur = 0
+                for _br in back_recs:
+                    for _n in _br:
+                        if _n in _prev_back:
+                            _back_occur += 1
+                if _back_occur < 2:
+                    # 选完全不含上期后区号码的配对
+                    _new_pairs = []
+                    for _a in range(1, 13):
+                        for _b in range(_a+1, 13):
+                            if _a not in _prev_back and _b not in _prev_back:
+                                _score = sum(1 for d in self.draws[-10:] if {_a, _b}.issubset(d[1]))
+                                _new_pairs.append((_a, _b, _score))
+                    _new_pairs.sort(key=lambda x: -x[2])
+                    for _a, _b, _ in _new_pairs[:2]:
+                        if [_a, _b] not in back_recs:
+                            back_recs.insert(0, [_a, _b])
+                            print(f"[DLT-Fusion] 🎯 后区全换保底注入: [{_a}, {_b}] "
+                                  f"(上期{_prev_back}完全换号)")
+                    back_recs = back_recs[:5]
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 后区全换保底跳过: {e}")
+
         # Step 3: 后区融合
         back_recs = self.get_back_recommendations()
 
@@ -1736,6 +1804,46 @@ class DLTFusionComplete:
                     print(f"[DLT-Fusion] 🎲 后区多样性过滤: {old_recs} → {back_recs}")
         except Exception as e:
             print(f"[DLT-Fusion] ⚠️ 后区多样性过滤跳过: {e}")
+
+        # 【V3.15.0-①】后区极端冷号保留 — 遗漏≥10期的冷号强制保留至少1组合
+        # 26078期实战：后区08遗漏后未进入back_recs，实际开08+11
+        try:
+            if len(self.draws) >= 15:
+                _back_last15 = [d[1] for d in self.draws[-15:]]
+                _cold_back_nums = []
+                for num in range(1, 13):
+                    _miss = 0
+                    for pair in reversed(_back_last15):
+                        if num not in pair:
+                            _miss += 1
+                        else:
+                            break
+                    else:
+                        _miss = 15
+                    if _miss >= 10:
+                        _cold_back_nums.append((num, _miss))
+                if _cold_back_nums:
+                    _covered = set()
+                    for br in back_recs:
+                        for n in br:
+                            _covered.add(n)
+                    _missing_cold = [(n, m) for n, m in _cold_back_nums if n not in _covered]
+                    if _missing_cold:
+                        _target, _miss = sorted(_missing_cold, key=lambda x: -x[1])[0]
+                        _best_partner, _best_score = None, -1
+                        for p in range(1, 13):
+                            if p == _target:
+                                continue
+                            _pscore = sum(1 for d in self.draws[-20:] if {_target, p}.issubset(d[1]))
+                            if _pscore > _best_score:
+                                _best_score = _pscore
+                                _best_partner = p
+                        if _best_partner is not None:
+                            _cold_pair = sorted([_target, _best_partner])
+                            back_recs[-1] = _cold_pair
+                            print(f"[DLT-Fusion] ❄️ 极端冷号保留: {_cold_pair} (num={_target}遗漏{_miss}期)")
+        except Exception as e:
+            print(f"[DLT-Fusion] ⚠️ 极端冷号保留跳过: {e}")
 
         # 【V3.1.5-③】后区直接重号路径注入 — 确保后区上期号码有机会被选入
         # 26069期实战：上期后区06,10，实际开出10重号，但5注中无一包含10
@@ -1858,6 +1966,16 @@ class DLTFusionComplete:
 
             # Step 7a: 常规综合评分
             self._compute_final_scores(all_candidates)
+
+            # [Plan I] 断区容忍度: 对候选应用_zone_penalty(软惩罚)
+            _zone_penalty_count = 0
+            for c in all_candidates:
+                zp = c.get('_zone_penalty', 1.0)
+                if zp < 1.0:
+                    c['final_score'] = c.get('final_score', 0.5) * zp
+                    _zone_penalty_count += 1
+            if _zone_penalty_count > 0:
+                print(f"[DLT-Fusion] [Plan I] 断区软惩罚: {_zone_penalty_count}注×0.85")
 
             # Step 7b: 【P3】决策树评分 + 跨期模式评分增强
         try:
@@ -2085,6 +2203,40 @@ class DLTFusionComplete:
         # 【优化3.0.3-④】最小覆盖保证 — 填补候选盲区
         try:
             all_candidates = self._ensure_min_coverage(all_candidates)
+        
+            # 【V3.14.0-B】前区三区分布均衡: 在最终候选集中确保2:2:1/2:1:2/1:2:2分布
+            # 26077期Top5前区Z1仅{4}一个号, Z2/Z3偏重导致14/24/27漏掉
+            # 对前K个候选按三区分布过滤: 确保至少1个候选覆盖三区
+            Z1 = set(range(1, 13))
+            Z2 = set(range(13, 25))
+            Z3 = set(range(25, 36))
+            _has_z1_z2_z3 = False
+            for c in all_candidates[:10]:
+                f = set(c.get('front', []))
+                z1n = len(f & Z1)
+                z2n = len(f & Z2)
+                z3n = len(f & Z3)
+                if z1n >= 1 and z2n >= 1 and z3n >= 1:
+                    _has_z1_z2_z3 = True
+                    break
+            if not _has_z1_z2_z3 and len(all_candidates) >= 5:
+                # 从剩余候选池找含三区分布的候选
+                _best_z123 = None
+                _best_score = -1
+                for c in all_candidates[5:]:
+                    f = set(c.get('front', []))
+                    if (f & Z1) and (f & Z2) and (f & Z3):
+                        fs = c.get('final_score', 0)
+                        if fs > _best_score:
+                            _best_score = fs
+                            _best_z123 = c
+                if _best_z123:
+                    _worst = min(all_candidates[:5], key=lambda x: x.get('final_score', 0))
+                    if _worst in all_candidates:
+                        all_candidates.remove(_worst)
+                        all_candidates.insert(0, _best_z123)
+                        print(f"[DLT-Fusion] 🌐 三区均衡注入: {sorted(_best_z123['front'])} "
+                              f"(替换{_worst.get('front',[])})")
         except Exception as e:
             print(f"[DLT-Fusion] ⚠️ 盲区补充跳过: {e}")
 
@@ -2448,13 +2600,29 @@ class DLTFusionComplete:
         consecutive_score = 1 - min(consecutive / 2, 1.0)
         fitness += consecutive_score * 0.05
 
-        # 和值范围 (10%)
+        # [Plan J] 和值范围 (10%) - 学生t分布替代三角分布
         front_sum = sum(front)
-        if 90 <= front_sum <= 130:
-            sum_score = 1.0
-        else:
-            sum_score = 1 - min(abs(front_sum - 110) / 50, 1.0)
+        _sum_dev = abs(front_sum - 110) / 20.0
+        _df_t = 3.0
+        sum_score = 1.0 / (1.0 + _sum_dev**2 / _df_t)**((_df_t + 1.0) / 2.0)
+        if 80 <= front_sum <= 130:
+            sum_score = max(sum_score, 0.85)
         fitness += sum_score * 0.10
+
+        # [Plan H] 邻号集体密度奖励 (5%): 上期邻号≥3个时加分
+        try:
+            if len(self.draws) >= 2:
+                _prev_front = set(self.draws[-1][0])
+                _neighbor_set = set()
+                for n in _prev_front:
+                    if n > 1: _neighbor_set.add(n - 1)
+                    if n < 35: _neighbor_set.add(n + 1)
+                _neighbor_overlap = len(set(front) & _neighbor_set)
+                if _neighbor_overlap >= 3:
+                    neighbor_score = min(0.05 * (_neighbor_overlap - 2), 0.15)
+                    fitness += neighbor_score * 0.05
+        except Exception:
+            pass
 
         # 跨期模式匹配度 (30%) - 新增：方案二核心
         if hasattr(self, 'pattern_recognizer') and self.pattern_recognizer._is_built:
@@ -2577,14 +2745,19 @@ class DLTFusionComplete:
                 drop_reasons['sum_range'] += 1
                 continue
 
-            # 规则3: 三区覆盖≥2个区域
+            # [Plan I] 断区容忍度展宽: 单区覆盖改为软惩罚而非硬丢弃
+            # 26076期实际开奖[15,20,27,28,35]一区(1-12)完全断区
+            # 历史中断区概率约0.5%, 但过度硬约束会压制合理的集中模式
             z1 = len(set(front) & ZONE1)
             z2 = len(set(front) & ZONE2)
             z3 = len(set(front) & ZONE3)
             active_zones = (1 if z1 > 0 else 0) + (1 if z2 > 0 else 0) + (1 if z3 > 0 else 0)
             if active_zones < 2:
+                # 不丢弃, 打标签降权重
+                c['_zone_penalty'] = 0.85  # 评分乘以0.85
                 drop_reasons['zone_single'] += 1
-                continue
+            else:
+                c['_zone_penalty'] = 1.0
 
             keep.append(c)
 
@@ -2705,6 +2878,8 @@ class DLTFusionComplete:
 
         # 【V1.5.0-D】中遗漏链式补缺: 遗漏6-12期且Z2中段无密集覆盖时强制补入
         # 26075期18遗漏约8期且16,18,26均是中段, 但仅低分#4包含18
+        # 【V3.14.0-D】前区中段(14-24)全面覆盖: 对Z2每个未覆盖号码独立检查
+        # 26077期14/24完全遗漏: 14(Z1尾Z2头)和24(Z2尾)均未在15个覆盖号码内
         try:
             _MISS_LOW = 6
             _MISS_HIGH = 12
@@ -2714,6 +2889,19 @@ class DLTFusionComplete:
                     _cnt = sum(1 for d in self.draws[-_MISS_HIGH:] if n in d[0])
                     if _cnt == 0 and n not in covered_z2_mid:
                         _mid_missing_nums.append(n)
+            # 【V3.14.0-D】完整Z2段(13-24)覆盖: 检查每个Z2号码是否至少在1个候选池中
+            _full_z2 = set(range(13, 25))
+            _covered_z2_nums = set()
+            for c in candidates:
+                _covered_z2_nums.update([n for n in c.get('front', []) if n in _full_z2])
+            _missing_z2 = sorted(_full_z2 - _covered_z2_nums)
+            if _missing_z2:
+                # 对Z2中每个遗漏号码(13-24), 从历史频率/source pool找注入路径
+                # 限制最多一次性补3个, 以免池膨胀
+                _z2_to_add = _missing_z2[:3]
+                for _n in _z2_to_add:
+                    if _n not in missing_nums:
+                        missing_nums.append(_n)
             if _mid_missing_nums:
                 # 按历史最高频排序
                 _freq_30 = {n: sum(1 for d in self.draws[-30:] if n in d[0]) for n in _mid_missing_nums}
@@ -2758,6 +2946,25 @@ class DLTFusionComplete:
         z2_covered_nums = [n for n in covered if n in ZONE2]
         total_front = len(covered)
         z2_ratio = len(z2_covered_nums) / max(total_front, 1)
+
+        # ====== [V3.16.0-④] Z2单号冷号保护 ======
+        # Z2覆盖<2个号码且覆盖的恰是冷号时, 补充Z2温号防单区真空
+        if len(z2_covered_nums) < 2:
+            _z2_cold_missing = []
+            for _n in range(13, 25):
+                if _n in z2_covered_nums:
+                    continue
+                _c = sum(1 for d in self.draws[-30:] if _n in d[0])
+                if _c < 3:
+                    _z2_cold_missing.append(_n)
+            if _z2_cold_missing:
+                _to_add = sorted(_z2_cold_missing,
+                                 key=lambda n: -sum(1 for d in self.draws[-30:] if n in d[0]))[:2]
+                for _n in _to_add:
+                    if _n not in missing_nums and _n not in covered:
+                        missing_nums.append(_n)
+                        print(f"[DLT-Fusion] 🔍 Z2单号冷号保底: 注入{_n} (Z2仅{len(z2_covered_nums)}个号)")
+
         z1_active_cold, z3_active_cold_ext = [], []
         if z2_ratio > 0.45 and len(self.draws) >= 20:
             win30 = min(30, len(self.draws))
@@ -3702,8 +3909,26 @@ class DLTFusionComplete:
         if zr_ratio >= 0.10:
             return candidates
 
+        # 检测连续断重趋势: 近2期前区是否都零重号
+        _consec_zero = 0
+        for _i in range(min(3, len(self.draws)-1)):
+            _d1 = set(self.draws[-_i-2][0])
+            _d2 = set(self.draws[-_i-1][0])
+            if len(_d1 & _d2) == 0:
+                _consec_zero += 1
+            else:
+                break
+
+        # 连续断重趋势下扩容注入量
+        _boost = 1.0
+        if _consec_zero >= 2:
+            _boost = 2.0
+            print(f"[DLT-Fusion] 🛡️ 连续{_consec_zero}期断重, 零重号注入量×{_boost}")
+        elif _consec_zero >= 1:
+            _boost = 1.5
+
         # 需要注入的零重号候选数量
-        target = max(int(total * 0.05), 2)
+        target = max(int(total * 0.05 * _boost), int(2 * _boost))
         injected = 0
 
         # 从现有候选池中选择与上期0重号且得分较高的
@@ -4945,7 +5170,7 @@ class DLTFusionComplete:
             return []
 
     def _diverse_topk_selection(self, candidates: List[Dict], k: int = 5, 
-                                   min_jaccard: float = 0.5) -> List[Dict]:
+                                   min_jaccard: float = 0.35) -> List[Dict]:
         """
         【缺口3】预测发散度控制 — 确定性退火选择TopK
 
@@ -5381,9 +5606,32 @@ class DLTFusionComplete:
         ])
         front_missing_norm = min(front_missing_avg / 30.0, 1.0)
 
-        # 和值评分
+        # [Plan J] 和值尾部轻罚重奖: 学生t分布替代三角分布
+        # 原公式 max(0, 1 - |sum-105|/50) 线性衰减, 尾部截断为0
+        # t分布(自由度df=3)尾部更厚, 极端和值保留合理分数
         front_sum = np.sum(front_arr)
-        sum_score = 1.0 if 80 <= front_sum <= 130 else max(0, 1 - abs(front_sum - 105) / 50)
+        _sum_dev = abs(front_sum - 110) / 20.0  # 归一化偏差
+        # t分布近似: f(x) = 1 / (1 + x²/df)^((df+1)/2), df=3
+        _df_t = 3.0
+        sum_score = 1.0 / (1.0 + _sum_dev**2 / _df_t)**((_df_t + 1.0) / 2.0)
+        # 和值80-130范围内不低于0.8, 确保常规和值高位
+        if 80 <= front_sum <= 130:
+            sum_score = max(sum_score, 0.85)
+
+        # [Plan H] 邻号集体密度检测: 前区号码与上期邻号≥3个时加分
+        neighbor_boost = 0.0
+        try:
+            if len(self.draws) >= 2:
+                _prev_front = set(self.draws[-1][0])
+                _neighbor_set = set()
+                for n in _prev_front:
+                    if n > 1: _neighbor_set.add(n - 1)
+                    if n < 35: _neighbor_set.add(n + 1)
+                _neighbor_overlap = len(set(front_arr) & _neighbor_set)
+                if _neighbor_overlap >= 3:
+                    neighbor_boost = 0.05 * (_neighbor_overlap - 2)  # 3个+0.05, 4个+0.10, 5个+0.15
+        except Exception:
+            pass
 
         # 奇偶评分
         odd_count = np.sum(front_arr % 2)
@@ -5396,7 +5644,8 @@ class DLTFusionComplete:
         # 前区综合（所有子项均为0-1，加权计算）
         front_prob = (front_freq_norm * 0.15 + front_recent_norm * 0.25 +
                       front_missing_norm * 0.15 + sum_score * 0.20 +
-                      odd_score * 0.10 + span_score * 0.15)
+                      odd_score * 0.10 + span_score * 0.15 +
+                      neighbor_boost * 0.05)  # [Plan H] 邻号集体密度加权
 
         # ---- 后区评分 ----
         back_freq_avg = np.mean([

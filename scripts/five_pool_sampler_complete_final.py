@@ -145,6 +145,35 @@ class MultiPoolSampler:
                 if cnt.get(num, 0) == 0 and len(cold_pool) > 0:
                     if num not in cold_pool:
                         cold_pool[-1] = num  # 替换最热的"冷号"
+        # 【V3.15.0-④】后区冷号池扩容：当存在遗漏≥10期的冷号时，降低阈值扩池
+        # 26078期实战：后区08遗漏后冷号池仅有6/9/3/7，08未入选
+        if zone == 'back' and hasattr(self, 'draws') and len(self.draws) >= 10:
+            _back_draws = [d[1] for d in self.draws[-15:]]
+            _extreme_cold = []
+            for num in range(1, 13):
+                _miss = 0
+                for pair in reversed(_back_draws):
+                    if num not in pair:
+                        _miss += 1
+                    else:
+                        break
+                else:
+                    _miss = 15
+                if _miss >= 10:
+                    _extreme_cold.append(num)
+            if _extreme_cold:
+                # 已有冷号不覆盖时，扩容阈值
+                _existing_cold = set(cold_pool)
+                _new_cold = [n for n in _extreme_cold if n not in _existing_cold]
+                if _new_cold:
+                    # 拉低阈值：mean - 0.3*std 代替 mean - 0.5*std
+                    loose_threshold = mean_v - 0.3 * std_v
+                    loose_cold = sorted([num for num, s in scores.items() if s <= loose_threshold],
+                                        key=lambda x: scores[x])
+                    # 合并，去重，保留顺序
+                    cold_pool = list(dict.fromkeys(loose_cold + cold_pool))
+                    print(f"[DLT-Fusion] ❄️ 后区冷号扩容: 阈值{threshold:.3f}→{loose_threshold:.3f}, "
+                          f"新增{_new_cold}, 池{cold_pool[:n]}")
         cold_pool = cold_pool[:n]
         print(f"❄️ 生成{zone}冷号池(阈值={threshold:.3f}): {cold_pool}")
         return cold_pool
